@@ -121,13 +121,15 @@ async function init() {
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches || matchMedia('(prefers-reduced-data: reduce)').matches;
   const small = matchMedia('(max-width: 819px), (orientation: portrait) and (max-width: 1100px), (orientation: landscape) and (max-height: 500px)').matches;
   if (reduced) { document.getElementById('no-webgl').hidden = false; canvas.style.display = 'none'; window.__sceneReady = 'fallback'; return; }
+  // Phones start on the cheap path: no MSAA, DPR 1. Antialias + bloom at
+  // DPR 1.5 is what judders on a phone GPU; desktop keeps full quality.
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: !small, powerPreference: 'high-performance' });
   } catch (e) {
     document.getElementById('no-webgl').hidden = false; canvas.style.display = 'none'; window.__sceneReady = 'fallback'; return;
   }
-  renderer.setPixelRatio(Math.min(devicePixelRatio, small ? 1.5 : 2));
+  renderer.setPixelRatio(small ? 1 : Math.min(devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NoToneMapping;
 
@@ -145,6 +147,7 @@ async function init() {
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
   const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.6, 0.85);
+  if (small) bloom.enabled = false; // phones: bloom is the single most expensive pass
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
@@ -386,7 +389,7 @@ async function init() {
   const qA = new THREE.Quaternion(), qB = new THREE.Quaternion(), qSpin = new THREE.Quaternion();
   const sizeFor = (aspect, s) => aspect === 0 ? [0.9 * s, 1.6 * s] : aspect === 1 ? [1.6 * s, 0.9 * s] : [1.1 * s, 1.1 * s];
 
-  let fpsSamples = [], lastFpsT = performance.now(), frames = 0, degraded = 0;
+  let fpsSamples = [], lastFpsT = performance.now(), frames = 0, degraded = small ? 2 : 0;
   function resize() {
     const w = innerWidth, h = innerHeight;
     camera.aspect = w / h; camera.updateProjectionMatrix();
@@ -397,9 +400,12 @@ async function init() {
   let running = true;
   document.addEventListener('visibilitychange', () => { running = !document.hidden; });
 
+  let tick = 0;
   function frame(now) {
     requestAnimationFrame(frame);
     if (!running) return;
+    // Phones render every other tick (~30fps). Steady 30 beats juddery 45-60.
+    if (small && (tick++ & 1)) return;
     const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
     const t = now / 1000;
     // Critically damped-ish spring on p (omega 6)

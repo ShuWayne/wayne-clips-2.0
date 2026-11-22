@@ -265,6 +265,9 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
   .stepbar{font-size:10px;padding:6px 8px;gap:8px}
   .stepbar span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .stepbar .cur{flex:none}
+  /* Phones: no backdrop blur — the animating WebGL canvas underneath forces
+     a re-blur of every glass panel each frame. Solid panels stay smooth. */
+  .glass{backdrop-filter:none;background:rgba(12,8,19,.94)}
   /* Crop label sits at the cropbox's top-left; keep the source tag clear of it. */
   .program .src-tag{left:auto;right:10px}
 }
