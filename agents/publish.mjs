@@ -5,7 +5,7 @@
 // backoff 5s x attempt); otherwise drafts + manual export, stated in the UI.
 // TikTok / Instagram: manual export only (no approved developer app).
 import { writeCaption, approvalChecklistValid, APPROVAL_CHECKLIST } from './guard.mjs';
-import { askJson, NotConfigured } from '../packages/shared/claude.mjs';
+import { askJson, NotConfigured, llmProvider } from '../packages/shared/llm.mjs';
 import { logEvent, setAgent, saveJob, readLedger, writeLedger, ledgerKey, countApprovalsToday } from '../packages/shared/job.mjs';
 
 const PLATFORMS = ['YouTube', 'Instagram', 'TikTok'];
@@ -26,7 +26,7 @@ export async function runPublish(job, ctx) {
   for (const clip of clips) {
     for (const platform of PLATFORMS) drafts.push(draftFor(clip, platform, job.input.niche));
   }
-  // Try Claude for titles/captions; heuristic drafts above are the fallback.
+  // Try the LLM (Claude, else GPT-6) for titles/captions; heuristic drafts above are the fallback.
   try {
     const out = await askJson({
       system: 'You write short-form titles, captions and hashtags. Captions ≤120 chars, plain words, no spoilers, no leak claims, never imply a company endorses the page. Sponsored captions must start with "Ad:".',
@@ -43,9 +43,9 @@ export async function runPublish(job, ctx) {
         slot.title = d.title.slice(0, 100); slot.caption = checked.caption; slot.hashtags = checked.hashtags;
       } catch { /* keep the heuristic draft; the guard refused the Claude one */ }
     }
-    logEvent(job, 'publish', 'done', `Publish: ${drafts.length} drafts written (Claude titles/captions, guard-checked). Nothing uploads before your approval; TikTok and Instagram are post-by-hand export only.`, emit);
+    logEvent(job, 'publish', 'done', `Publish: ${drafts.length} drafts written (${llmProvider() === 'openai' ? 'GPT-6' : 'Claude'} titles/captions, guard-checked). Nothing uploads before your approval; TikTok and Instagram are post-by-hand export only.`, emit);
   } catch (err) {
-    const why = err.code === 'NOT_CONFIGURED' ? 'no Claude key — heuristic drafts' : `Claude failed (${err.message.slice(0, 100)}) — heuristic drafts`;
+    const why = err.code === 'NOT_CONFIGURED' ? 'no LLM key (Claude/OpenAI) — heuristic drafts' : `LLM failed (${err.message.slice(0, 100)}) — heuristic drafts`;
     logEvent(job, 'publish', 'done', `Publish: ${drafts.length} drafts written (${why}). Nothing uploads before your approval; TikTok and Instagram are post-by-hand export only.`, emit);
   }
   job.drafts = drafts;

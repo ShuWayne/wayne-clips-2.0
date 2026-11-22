@@ -19,7 +19,10 @@ Docker (identical environment to Render):
 docker build -t wayne-clips . && docker run -p 8787:10000 wayne-clips
 ```
 
-Deploy on Render: connect the repo, it picks up `render.yaml` (Docker runtime). Set `ANTHROPIC_API_KEY`, `YOUTUBE_API_KEY`, `YOUTUBE_ACCESS_TOKEN` in the Render dashboard when they exist — the app runs without them and says so in the UI. See `.env.example`.
+Deploy on Render: connect the repo, it picks up `render.yaml` (Docker runtime). Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `YOUTUBE_API_KEY`, `YOUTUBE_ACCESS_TOKEN` in the Render dashboard when they exist — the app runs without them and says so in the UI. See `.env.example`.
+- LLM chain (packages/shared/llm.mjs): Claude first, then OpenAI GPT-6 (default `gpt-6.2-sol`, `OPENAI_MODEL` overrides, frontier `gpt-6.2-astra`), then the honest heuristic fallback. Same forced-JSON + schema validation on every provider; every attempt is logged in `jobs/<id>/agent.log`.
+- Scout really calls YouTube Data API v3 when `YOUTUBE_API_KEY` is set (search.list + videos.list, ~101 quota units/run) and ranks by real views/likes; a failed call falls back to local patterns and says so. Live results are trends to learn from — rights stays 'unknown' without a Hub licence.
+- Studio shows no demo/sample content at all: with no finished job it shows an empty state ("No clips yet") instead of the old SAMPLE loop.
 
 ## Layout
 

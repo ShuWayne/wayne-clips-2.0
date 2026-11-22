@@ -213,6 +213,7 @@ const routes = {
 function showLanding() {
   $('#landing').hidden = false; $('#app').hidden = true;
   $('.hud').hidden = false;
+  $('#rail').hidden = false;
   $('#landing').style.display = ''; document.body.style.overflow = '';
   onScrollLanding();
 }
@@ -220,7 +221,11 @@ function showApp(html) {
   $('#landing').hidden = true; $('#app').hidden = false;
   // The landing HUD (chapter rail, SCROLL / paste hint, sound button) is
   // landing-only: it must never float over Studio, Jobs or any app view.
+  // Both .hud and #rail sit outside #landing, so hiding #landing alone
+  // does not hide them — the browser diagnosis caught the rail still
+  // showing on Studio at desktop width.
   $('.hud').hidden = true;
+  $('#rail').hidden = true;
   $('#app').innerHTML = `<div class="view">${html}</div>`;
   scrollTo(0, 0);
 }
@@ -351,7 +356,7 @@ function viewNew() {
   wireLinkBox('new');
 }
 async function viewStudio() {
-  showApp(`<h1>Clip Studio</h1><p class="lede">The 30-second loop, live. When a real job exists the panels bind to it; otherwise the loop runs on the demo and every panel is tagged SAMPLE.</p>
+  showApp(`<h1>Clip Studio</h1><p class="lede">The 30-second loop, live — bound to your latest finished job. No demo, no sample content: until a job finishes, this page says so and points you at starting one.</p>
   <div id="studio-banner"></div><div id="studio-root"><p class="lede">Loading the Studio…</p></div>`);
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   const jobId = params.get('job');
@@ -361,43 +366,49 @@ async function viewStudio() {
   try { toolkit = (await api.get('/api/toolkit')).tools; } catch {}
   try {
     if (jobId) job = (await api.get(`/api/jobs/${jobId}`)).job;
-    else { const { jobs } = await api.get('/api/jobs'); job = jobs.find(j => j.status === 'done') || null; }
+    else { const { jobs } = await api.get('/api/jobs'); job = jobs.find(j => j.status === 'done') || jobs.find(j => j.status === 'running') || jobs.find(j => j.status === 'failed') || null; }
   } catch {}
-  const isDemo = !job || !(job.clips || []).length;
-  if (isDemo) {
-    $('#studio-banner').innerHTML = `<div class="banner"><b>SAMPLE</b><span>Run a job to see your own clip here — this loop is the demo from studio-demo.json.</span></div>`;
-    clips = (demo?.moments || []).map((m, i) => ({ rank: i + 1, ...m, captionText: m.hook, captionStyle: 'pop', fontScale: 1 }));
-  } else {
-    clips = job.clips.map(c => ({ ...c }));
-    $('#studio-banner').innerHTML = `<div class="banner" style="background:rgba(140,231,215,.08);border-color:rgba(140,231,215,.4);color:var(--mint)"><b>REAL JOB</b><span>${esc(job.id)} — ${clips.length} clips. Edits here regenerate the clip.</span></div>`;
+  // No finished job with clips: empty state. No demo loop, no SAMPLE banner,
+  // no sample tags anywhere on this page.
+  if (!job || !(job.clips || []).length) {
+    const statusNote = !job
+      ? 'No jobs yet.'
+      : job.status === 'running'
+        ? `Latest job ${esc(job.id.slice(0, 8))} is still running — its clips will show up here when it finishes.`
+        : `Latest job ${esc(job.id.slice(0, 8))} is ${esc(job.status)} and has no clips — open it to see why.`;
+    $('#studio-banner').innerHTML = '';
+    $('#studio-root').innerHTML = `<div class="panel glass"><h2>No clips yet</h2><p class="lede">${statusNote} Paste a link or upload a video file and the 7 agents will cut it into captioned 9:16 clips. Nothing here is a demo.</p><div class="row" style="display:flex;gap:10px;flex-wrap:wrap"><a class="btn primary" href="#/new">+ New job — paste a link or upload</a>${job ? `<a class="btn ghost" href="#/jobs/${job.id}">Open latest job</a>` : ''}<a class="btn ghost" href="#/jobs">All jobs</a></div></div>`;
+    return;
   }
+  clips = job.clips.map(c => ({ ...c }));
+  $('#studio-banner').innerHTML = `<div class="banner" style="background:rgba(140,231,215,.08);border-color:rgba(140,231,215,.4);color:var(--mint)"><b>REAL JOB</b><span>${esc(job.id)} — ${clips.length} clips. Edits here regenerate the clip.</span></div>`;
   const sel = clips[Math.min(clipRank - 1, clips.length - 1)] || clips[0];
   const tools = demo?.tools || [];
   const steps = demo?.steps || [];
   $('#studio-root').innerHTML = `
   <div class="studio" id="studio-grid">
     <div class="panel glass wide" style="padding:14px 20px">
-      <div class="studio-top"><div><h2 class="studio-title">WAYNE.CLIPS <span>/ STUDIO</span></h2><div class="studio-sub">${esc(job ? job.id.slice(0, 8) : 'SAMPLE_JOB')} × 7 AGENTS ${isDemo ? '<span class="tag sample">SAMPLE</span>' : ''}</div></div><div class="clipit">CLIP IT.<br>SHIP IT.</div></div>
+      <div class="studio-top"><div><h2 class="studio-title">WAYNE.CLIPS <span>/ STUDIO</span></h2><div class="studio-sub">${esc(job.id.slice(0, 8))} × 7 AGENTS</div></div><div class="clipit">CLIP IT.<br>SHIP IT.</div></div>
       <div class="stepbar"><span class="cur" id="st-step">01 / CAPTURE</span><span id="st-bar">DROP / Bring the source in</span><span id="st-time">00.00 / 30.00</span></div>
     </div>
     <div class="panel glass"><h2>PROGRAM / SOURCE_01 <span class="mono" style="color:var(--text-3)">ORIGINAL SPEED</span></h2>
       <div class="program" id="program">
-        ${job && sel ? `<video id="prog-video" src="/files/${job.id}/clip-${sel.rank}.mp4" poster="/files/${job.id}/clip-${sel.rank}.jpg" loop muted playsinline></video>` : `<div style="width:100%;height:100%;background:linear-gradient(135deg,#EE5FA7,#7C3AED);display:flex;align-items:center;justify-content:center;font-family:var(--disp);font-size:28px;color:#fff">${esc(sel?.captionText || 'SAMPLE SOURCE')}</div>`}
-        <span class="src-tag">● ${esc(job ? (job.input.sourceUrl || job.input.sourceFile || 'SOURCE') : 'SAMPLE SOURCE')}</span>
+        <video id="prog-video" src="/files/${job.id}/clip-${sel.rank}.mp4" poster="/files/${job.id}/clip-${sel.rank}.jpg" loop muted playsinline></video>
+        <span class="src-tag">● ${esc(job.input.sourceUrl || job.input.sourceFile || 'SOURCE')}</span>
         <div class="cropbox" id="cropbox" style="left:22%;top:8%;width:56%;height:84%"><span class="clab">9:16 / CROP 02</span><span class="xlab" id="crop-x">X 44.3%</span>
           <span class="handle" style="top:-3px;left:-3px"></span><span class="handle" style="top:-3px;right:-3px"></span><span class="handle" style="bottom:-3px;left:-3px"></span><span class="handle" style="bottom:-3px;right:-3px"></span><span class="handle" style="top:-3px;left:calc(50% - 3px)"></span><span class="handle" style="bottom:-3px;left:calc(50% - 3px)"></span></div>
-        <div class="capbox" id="capbox"><i></i><i></i><i></i><i></i><span id="capbox-text">${esc(sel?.captionText || 'NEW CAPTION')}. </span></div>
+        <div class="capbox" id="capbox"><i></i><i></i><i></i><i></i><span id="capbox-text">${esc(sel?.captionText || '')}</span></div>
       </div>
-      <div class="transport"><button id="st-play" aria-label="Play or pause">⏸</button><span class="tc" id="st-tc">00:06:00</span><span class="src">SOURCE ${sel ? `${Math.round(sel.start)}–${Math.round(sel.end)} SEC` : '18–48 SEC'}</span></div>
+      <div class="transport"><button id="st-play" aria-label="Play or pause">⏸</button><span class="tc" id="st-tc">00:06:00</span><span class="src">SOURCE ${Math.round(sel.start)}–${Math.round(sel.end)} SEC</span></div>
       <div class="hairline" id="st-hair"></div>
-      <div class="row" style="display:flex;gap:8px;margin-top:10px"><span class="tag sample">SAMPLE</span><span class="tag">9:16 / H.264</span><span class="tag mint">VIDEO + CAPTIONS</span></div>
+      <div class="row" style="display:flex;gap:8px;margin-top:10px"><span class="tag mint">CLIP #${sel.rank}</span><span class="tag">9:16 / H.264</span><span class="tag mint">VIDEO + CAPTIONS</span></div>
     </div>
     <div>
       <div class="panel glass" style="margin-bottom:12px"><h2>MEDIA BIN / SOURCE MOMENTS</h2>
-        <div class="thumbs">${clips.slice(0, 3).map((c, i) => `<button data-bin="${c.rank}" class="${c.rank === sel.rank ? 'sel' : ''}">${job ? `<video src="/files/${job.id}/clip-${c.rank}.mp4" muted preload="metadata"></video>` : `<div style="aspect-ratio:16/9;background:linear-gradient(135deg,#B39DFF,#EE5FA7)"></div>`}<span>${c.start.toFixed(1)}s — ${esc(c.captionText || c.hook)}</span></button>`).join('')}</div>
+        <div class="thumbs">${clips.slice(0, 3).map((c, i) => `<button data-bin="${c.rank}" class="${c.rank === sel.rank ? 'sel' : ''}"><video src="/files/${job.id}/clip-${c.rank}.mp4" muted preload="metadata"></video><span>${c.start.toFixed(1)}s — ${esc(c.captionText || c.hook)}</span></button>`).join('')}</div>
       </div>
       <div class="panel glass" style="margin-bottom:12px"><h2>INSPECTOR / LIVE EDIT <span style="color:var(--pink);font-size:11px">KEYFRAMES</span></h2>
-        <input class="insp-field" id="insp-caption" value="${esc(sel?.captionText || 'NEW CAPTION')}" aria-label="Live caption">
+        <input class="insp-field" id="insp-caption" value="${esc(sel?.captionText || '')}" aria-label="Live caption">
         <div class="kv"><span>FONT</span><b>ANTON</b><input type="range" id="insp-size" min="24" max="56" value="${Math.round(36 * (sel?.fontScale || 1))}" aria-label="Font size"><b id="insp-size-v">${Math.round(36 * (sel?.fontScale || 1))} PX</b></div>
         <div class="kv"><span style="color:var(--mint)">MOTION CROP</span><b id="insp-crop">X 44.3%</b><b>9:16 / SAFE AREA</b></div>
         <div class="chiprow" id="kf-chips"></div>
@@ -408,7 +419,7 @@ async function viewStudio() {
         <div id="takeover" hidden><span class="tag mint">YOU HAVE THE CURSOR</span> <button class="btn mint sm" id="apply-takeover">Apply &amp; regenerate clip</button></div>
       </div>
       <div class="panel glass"><h2>9:16 / OUTPUT PREVIEW</h2>
-        <div style="display:flex;gap:12px;align-items:center"><div style="width:74px;aspect-ratio:9/16;border-radius:10px;background:linear-gradient(160deg,#EE5FA7,#7C3AED);display:flex;align-items:flex-end;padding:8px;font-family:var(--disp);font-size:11px;color:#fff">${esc(sel?.captionText || 'SAMPLE')}</div>
+        <div style="display:flex;gap:12px;align-items:center"><div style="width:74px;aspect-ratio:9/16;border-radius:10px;background:linear-gradient(160deg,#EE5FA7,#7C3AED);display:flex;align-items:flex-end;padding:8px;font-family:var(--disp);font-size:11px;color:#fff">${esc(sel?.captionText || '')}</div>
         <div><b>SHORT_0${sel?.rank || 1}</b><div class="mono" style="font-size:11px;color:var(--text-2)">9:16 / H.264<br><span style="color:var(--mint)">VIDEO + CAPTIONS</span></div></div></div>
         <div class="kv" style="margin-top:12px"><span>EXPORT / H.264</span><b id="export-label">QUEUED</b></div>
         <div class="bar"><i id="export-bar" style="width:0%"></i></div>
@@ -436,7 +447,8 @@ async function viewStudio() {
   $('#wave').innerHTML = Array.from({ length: 90 }, (_, i) => `<i style="height:${20 + Math.abs(Math.sin(i * 0.7)) * 70}%"></i>`).join('');
   // Studio loop state
   let t = 0, playing = true, takenOver = false;
-  const caps = demo?.captions || ['THIS CHANGES EVERYTHING.', 'CLIP THAT.', 'KEEP THE CHAOS.', 'NOBODY TELLS YOU THIS.', 'RUN IT BACK.', 'READY TO DROP.'];
+  // Loop captions cycle through this job's real clip captions — never demo lines.
+  const caps = clips.map(c => (c.captionText || c.hook || '').toUpperCase()).filter(Boolean);
   const stepFor = tt => steps.find(s => tt >= s.t0 && tt < s.t1) || steps[steps.length - 1];
   const cursorMoves = [
     { at: 1, x: '70%', y: '18%', tag: '01 Select', color: 'var(--pink)', tool: 'claude' },
@@ -461,8 +473,8 @@ async function viewStudio() {
     $('#playhead').style.left = `${(t / 30) * 100}%`;
     $('#ripple-tag').hidden = !(t >= 4 && t < 10);
     $('#fill-source').style.transform = `scaleX(${Math.min(1, t / 4)})`;
-    const capIdx = Math.min(caps.length - 1, Math.floor(t / 5));
-    if (!takenOver) $('#capbox-text').textContent = (t < 4 ? 'NEW CAPTION' : caps[capIdx]) + '. ';
+    const capIdx = caps.length ? Math.min(caps.length - 1, Math.floor(t / 5)) : 0;
+    if (!takenOver) { const txt = t < 4 ? (sel?.captionText || caps[0] || '') : (caps[capIdx] || ''); $('#capbox-text').textContent = txt ? txt + '. ' : ''; }
     $('#cap-pills').innerHTML = caps.slice(0, Math.max(1, Math.floor(t / 5))).map((c, i) => `<span class="pill" style="left:${8 + i * 15}%">${esc(c)}</span>`).join('');
     // crop slide 15–19s: X 44.3% -> 52.8%
     const cx = t < 15 ? 44.3 : t > 19 ? 52.8 : 44.3 + ((t - 15) / 4) * 8.5;
@@ -492,7 +504,6 @@ async function viewStudio() {
   $('#st-play').addEventListener('click', () => { playing = !playing; $('#st-play').textContent = playing ? '⏸' : '▶'; });
   $$('[data-bin]').forEach(b => b.addEventListener('click', () => { location.hash = `#/studio?job=${job?.id || ''}&clip=${b.dataset.bin}`; }));
   const armTakeover = () => {
-    if (!job) { toast('Demo mode — run a job to take over a real clip.'); return; }
     takenOver = true;
     $('#takeover').hidden = false;
     toast('You have the cursor — edits pause the agents.');
@@ -520,7 +531,7 @@ async function viewScout() {
     $('#scout-out').innerHTML = '<p class="lede">Scouting…</p>';
     try {
       const r = await api.post('/api/scout', { niche: $('#scout-niche').value.trim() });
-      $('#scout-out').innerHTML = `<p class="note" style="margin-bottom:14px">${esc(r.note)} ${r.claudeAvailable ? 'Claude shortlist available.' : 'Claude not connected.'}</p>
+      $('#scout-out').innerHTML = `<p class="note" style="margin-bottom:14px">${esc(r.note)} ${r.llmProvider === 'claude' ? 'Claude shortlist available.' : r.llmProvider === 'openai' ? `GPT-6 shortlist available (${esc(r.llmModel || '')}).` : 'No LLM connected — heuristic list only.'}</p>
       <div class="cards">${r.niches.map(n => `<article class="card glass"><h3>${esc(n.name)}</h3><p>${esc(n.why)}</p>
         <div class="bar"><i style="width:${Math.round(n.score * 100)}%"></i></div>
         <div class="row"><span class="tag mint">score ${n.score}</span><span class="tag">${esc(n.pattern.clipSeconds)}s typical</span><span class="tag">${esc(n.pattern.hashtags.join(' '))}</span><span class="tag">best ${esc(n.pattern.bestHours)}</span></div></article>`).join('')}</div>
@@ -674,7 +685,9 @@ async function viewSettings() {
   <div class="panel glass"><h2>Platform limits <span class="mono" id="set-limits-when"></span></h2><div id="set-limits"></div></div>
   <div class="panel glass"><h2>Keys &amp; connections</h2><p class="lede">Set these as environment variables on the server (see .env.example). The UI never asks for secrets in a form.</p>
   <table class="tbl"><tr><th>Key</th><th>What it unlocks</th><th>Status</th></tr>
-  <tr><td>ANTHROPIC_API_KEY</td><td>Claude scoring, titles, Scout shortlist</td><td class="mono">—</td></tr>
+  <tr><td>ANTHROPIC_API_KEY</td><td>Claude scoring, titles, Scout shortlist (tried first)</td><td class="mono">—</td></tr>
+  <tr><td>OPENAI_API_KEY</td><td>GPT-6 scoring, titles, Scout shortlist (used when Claude has no key)</td><td class="mono">—</td></tr>
+  <tr><td>OPENAI_MODEL</td><td>GPT-6 model id — default gpt-6.2-sol, frontier gpt-6.2-astra</td><td class="mono">—</td></tr>
   <tr><td>YOUTUBE_API_KEY</td><td>Scout live metadata</td><td class="mono">—</td></tr>
   <tr><td>YOUTUBE_ACCESS_TOKEN</td><td>Real YouTube uploads (private by default)</td><td class="mono">—</td></tr>
   <tr><td>REDIS_URL / QUEUE=bullmq</td><td>BullMQ queue instead of in-process</td><td class="mono">—</td></tr></table></div>

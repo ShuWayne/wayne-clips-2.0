@@ -5,7 +5,7 @@
 // zero tolerated. Claude scores when a key is set, else the heuristic
 // scorer (and the log says so).
 import { flagText, scoreSentence } from './guard.mjs';
-import { askJson, NotConfigured } from '../packages/shared/claude.mjs';
+import { askJson, NotConfigured, llmProvider } from '../packages/shared/llm.mjs';
 import { logEvent, setAgent, saveJob } from '../packages/shared/job.mjs';
 
 export const MOMENT_SCHEMA = {
@@ -120,7 +120,7 @@ export async function runViral(job, ctx) {
       schema: MOMENT_SCHEMA,
       runsDir: job.dirAbs,
     });
-    engine = 'claude';
+    engine = llmProvider();
     // Validate timestamps exist in the transcript and drop flagged moments.
     const valid = out.moments.filter(m => {
       const ok = sentences.some(s => Math.abs(s.start - m.start) < 1.5) && m.end > m.start && m.end - m.start <= 60;
@@ -129,7 +129,7 @@ export async function runViral(job, ctx) {
     picked = { moments: valid.slice(0, 8), dropped: out.moments.length - valid.length };
   } catch (err) {
     if (err.code !== 'NOT_CONFIGURED') {
-      logEvent(job, 'viral', 'running', `Viral Moments: Claude scoring failed (${err.message.slice(0, 120)}) — falling back to the heuristic scorer.`, emit);
+      logEvent(job, 'viral', 'running', `Viral Moments: LLM scoring failed (${err.message.slice(0, 120)}) — falling back to the heuristic scorer.`, emit);
     }
     picked = pickMoments(sentences, duration, { maxClips: parseInt(process.env.MAX_CLIPS_PER_JOB || '6', 10) });
   }

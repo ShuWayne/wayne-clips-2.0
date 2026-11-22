@@ -163,7 +163,8 @@ async function probeToolkit() {
     const { stdout } = await mediaRun('python3', ['-c', "import faster_whisper; print(faster_whisper.__version__)"], { timeoutMs: 15000 });
     return stdout.trim();
   });
-  probes.push({ id: 'claude', name: 'Claude Messages API', version: process.env.ANTHROPIC_API_KEY ? (process.env.CLAUDE_MODEL || 'claude-sonnet-5-5') : null, status: process.env.ANTHROPIC_API_KEY ? 'connected' : 'not_connected', note: process.env.ANTHROPIC_API_KEY ? '' : 'No ANTHROPIC_API_KEY — heuristic fallback is used and the log says so.' });
+  probes.push({ id: 'claude', name: 'Claude Messages API', version: process.env.ANTHROPIC_API_KEY ? (process.env.CLAUDE_MODEL || 'claude-sonnet-5-5') : null, status: process.env.ANTHROPIC_API_KEY ? 'connected' : 'not_connected', note: process.env.ANTHROPIC_API_KEY ? '' : 'No ANTHROPIC_API_KEY — GPT-6 is used when OPENAI_API_KEY is set, else the heuristic fallback.' });
+  probes.push({ id: 'openai', name: 'OpenAI API (GPT-6)', version: process.env.OPENAI_API_KEY ? (process.env.OPENAI_MODEL || 'gpt-6.2-sol') : null, status: process.env.OPENAI_API_KEY ? 'connected' : 'not_connected', note: process.env.OPENAI_API_KEY ? '' : 'No OPENAI_API_KEY — Claude is tried first; without either key the heuristic fallback is used and the log says so.' });
   probes.push({ id: 'youtube', name: 'YouTube Data API', version: null, status: process.env.YOUTUBE_API_KEY ? 'connected' : 'not_connected', note: process.env.YOUTUBE_API_KEY ? '' : 'No YOUTUBE_API_KEY — Scout cannot read live YouTube metadata.' });
   probes.push({ id: 'youtube-upload', name: 'YouTube upload', version: null, status: process.env.YOUTUBE_ACCESS_TOKEN ? 'connected' : 'not_connected', note: process.env.YOUTUBE_ACCESS_TOKEN ? 'Uploads go live as private videos after approval.' : 'No YOUTUBE_ACCESS_TOKEN — approvals are manual-export only.' });
   probes.push({ id: 'redis', name: 'Redis / BullMQ queue', version: null, status: 'not_connected', note: 'Not configured — the in-process queue is used instead.' });
@@ -178,7 +179,7 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (path === '/api/health' && method === 'GET') {
-    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY } });
+    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, openai: !!process.env.OPENAI_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY } });
   }
   if (path === '/api/toolkit' && method === 'GET') {
     return sendJson(res, 200, { ok: true, tools: await probeToolkit() });
