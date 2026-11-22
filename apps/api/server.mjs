@@ -12,8 +12,9 @@ import { validateJobInput } from '../../agents/guard.mjs';
 import { run as runOrchestrator, regenerateClip } from '../../packages/orchestrator/run.mjs';
 import { runScout } from '../../agents/scout.mjs';
 import { approvePublish } from '../../agents/publish.mjs';
-import { listTelegramUpdates, downloadTelegramFile } from '../../agents/telegram.mjs';
+import { listTelegramUpdates, downloadTelegramFile, restoreJobsFromTelegram } from '../../agents/telegram.mjs';
 import { validateInitData, createSessionToken, verifySessionToken } from '../../agents/telegram-auth.mjs';
+import { r2Config, mirrorPut, restoreJobs } from '../../packages/shared/store.mjs';
 import { run as mediaRun } from '../../packages/shared/media.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -33,6 +34,11 @@ async function readStore(name, fallback) {
 async function writeStore(name, data) {
   await mkdir(DATA_ROOT, { recursive: true });
   await writeFile(join(DATA_ROOT, name), JSON.stringify(data, null, 2));
+  // Best-effort mirror to external storage — never fails the request.
+  try {
+    const cfg = r2Config(process.env);
+    if (cfg) await mirrorPut({ config: cfg, key: `data/${name}`, body: JSON.stringify(data, null, 2), contentType: 'application/json', timeoutMs: 5000 });
+  } catch (e) { console.error(`[store] data/${name} mirror failed:`, e.message); }
 }
 async function getLicences() { return readStore('licences.json', []); }
 async function getPages() { return readStore('pages.json', []); }
@@ -174,6 +180,7 @@ async function probeToolkit() {
   probes.push({ id: 'youtube', name: 'YouTube Data API', version: null, status: process.env.YOUTUBE_API_KEY ? 'connected' : 'not_connected', note: process.env.YOUTUBE_API_KEY ? '' : 'No YOUTUBE_API_KEY — Scout cannot read live YouTube metadata.' });
   probes.push({ id: 'youtube-upload', name: 'YouTube upload', version: null, status: process.env.YOUTUBE_ACCESS_TOKEN ? 'connected' : 'not_connected', note: process.env.YOUTUBE_ACCESS_TOKEN ? 'Uploads go live as private videos after approval.' : 'No YOUTUBE_ACCESS_TOKEN — approvals are manual-export only.' });
   probes.push({ id: 'telegram', name: 'Telegram backup', version: null, status: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'connected' : 'not_connected', note: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'Finished clips are pushed to Telegram cloud after render + QA.' : 'No TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — finished clips are not backed up off the job disk.' });
+  probes.push({ id: 'storage', name: 'External job storage (R2)', version: null, status: r2Config(process.env) ? 'connected' : 'not_connected', note: r2Config(process.env) ? 'Job records + media are mirrored to R2 and restored on boot — jobs survive restarts.' : 'No R2 env vars — jobs live only on the ephemeral disk and vanish on restart.' });
   probes.push({ id: 'redis', name: 'Redis / BullMQ queue', version: null, status: 'not_connected', note: 'Not configured — the in-process queue is used instead.' });
   probes.push({ id: 'libass', name: 'libass caption burn-in', version: null, status: probes.find(p => p.id === 'ffmpeg')?.status === 'connected' ? 'connected' : 'not_connected', note: 'Ships with FFmpeg; unavailable while FFmpeg is unavailable.' });
   probes.push({ id: 'reframe', name: 'Reframe engine', version: null, status: probes.find(p => p.id === 'ffmpeg')?.status === 'connected' ? 'connected' : 'not_connected', note: 'Runs on FFmpeg crops; unavailable while FFmpeg is unavailable.' });
@@ -186,7 +193,7 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (path === '/api/health' && method === 'GET') {
-    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, openai: !!process.env.OPENAI_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY, telegram: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) } });
+    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, openai: !!process.env.OPENAI_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY, telegram: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID), storage: !!r2Config(process.env) } });
   }
   if (path === '/api/toolkit' && method === 'GET') {
     return sendJson(res, 200, { ok: true, tools: await probeToolkit() });
@@ -558,5 +565,24 @@ for (const [name, fallback] of [['pages.json', []], ['licences.json', []], ['cam
   const p = join(DATA_ROOT, name);
   if (!existsSync(p)) await writeFile(p, JSON.stringify(fallback, null, 2));
 }
+// Boot restore from external storage (best-effort): jobs wiped from the
+// ephemeral disk come back from R2 instead of vanishing. A slow or failed
+// restore never blocks startup — the server starts either way.
+try {
+  const storeCfg = r2Config(process.env);
+  if (storeCfg) {
+    const report = await restoreJobs({ config: storeCfg, jobsRoot: JOBS_ROOT });
+    if (report.restored.length || report.sourceMissing.length) console.log(`[store] boot restore: ${report.restored.join(', ') || 'none'} restored; source missing: ${report.sourceMissing.join(', ') || 'none'}`);
+    else console.log('[store] boot restore: nothing to restore');
+  }
+} catch (e) { console.error('[store] boot restore failed:', e.message); }
+// Boot restore from Telegram (best-effort, same window as R2 restore):
+// jobs whose snapshot is still in the channel's recent updates come back.
+try {
+  if (process.env.TELEGRAM_BOT_TOKEN) {
+    const tgReport = await restoreJobsFromTelegram({ jobsRoot: JOBS_ROOT, token: process.env.TELEGRAM_BOT_TOKEN });
+    if (tgReport.restored.length || tgReport.sourceMissing.length) console.log(`[store] telegram restore: ${tgReport.restored.join(', ') || 'none'} restored; source missing: ${tgReport.sourceMissing.join(', ') || 'none'}`);
+  }
+} catch (e) { console.error('[store] telegram restore failed:', e.message); }
 server.listen(PORT, HOST, () => console.log(`Wayne.clips listening on http://${HOST}:${PORT}`));
 export { server };

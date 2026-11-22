@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { backupClipsToTelegram, listTelegramUpdates, downloadTelegramFile, telegramChatIdFor, TELEGRAM_BOT_MAX_BYTES, TELEGRAM_BOT_MAX_DOWNLOAD_BYTES } from '../agents/telegram.mjs';
+import { backupClipsToTelegram, listTelegramUpdates, downloadTelegramFile, telegramChatIdFor, postJobSnapshot, sendSourceToTelegram, restoreJobsFromTelegram, TELEGRAM_BOT_MAX_BYTES, TELEGRAM_BOT_MAX_DOWNLOAD_BYTES } from '../agents/telegram.mjs';
 import { validateJobInput } from '../agents/guard.mjs';
 import { runPublish } from '../agents/publish.mjs';
 
@@ -113,8 +113,12 @@ test('runPublish backs clips up when Telegram is configured, and still completes
   });
   const { drafts } = await runPublish(job, { emit: () => {} });
   assert.equal(drafts.length, 3);
-  assert.equal(calls.length, 1);
+  // Clip backup (sendVideo) + final job snapshot (sendDocument).
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].url, /sendVideo/);
+  assert.match(calls[1].url, /sendDocument/);
   assert.equal(job.telegram.backups[0].status, 'backed_up');
+  assert.equal(job.telegram.snapshots[0].stage, 'publish');
 });
 
 test('the 50 MB bot cap is the enforced limit', () => {
@@ -196,4 +200,117 @@ test('downloadTelegramFile refuses files over the 20 MB bot download cap', async
     downloadTelegramFile({ token: 'T', fileId: 'BIG', destPath: '/tmp/never.mp4', fetchImpl }),
     /20 MB/,
   );
+});
+
+// --- Telegram storage v1: snapshots, source send, restore ---
+
+test('postJobSnapshot sends job.json as a document with the job id in the caption', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-tg-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const calls = [];
+  const job = fakeJob(dir, [{ hook: 'HELLO' }]);
+  job.updatedAt = '2026-11-22T08:00:00.000Z';
+  const out = await postJobSnapshot(job, { emit: () => {} }, {
+    env: { TELEGRAM_BOT_TOKEN: 'TESTTOKEN', TELEGRAM_CHAT_ID: '-100123' },
+    fetchImpl: okFetch(calls, { message_id: 7, document: { file_id: 'DOC1' } }),
+    retryDelayMs: 0, stage: 'ingest',
+  });
+  assert.equal(out.configured, true);
+  assert.equal(out.fileId, 'DOC1');
+  assert.equal(out.messageId, 7);
+  assert.match(calls[0].url, /api\.telegram\.org\/botTESTTOKEN\/sendDocument/);
+  const doc = calls[0].init.body.get('document');
+  assert.ok(doc instanceof File);
+  assert.equal(doc.name, `${job.id}.json`);
+  assert.match(calls[0].init.body.get('caption'), new RegExp(`Wayne\\.clips job ${job.id} — snapshot ingest`));
+  assert.equal(job.telegram.snapshots[0].fileId, 'DOC1');
+});
+
+test('postJobSnapshot skips cleanly when unconfigured and never throws on send failure', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-tg-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const job = fakeJob(dir, [{ hook: 'HELLO' }]);
+  const unconf = await postJobSnapshot(job, { emit: () => {} }, { env: {}, fetchImpl: okFetch([]), retryDelayMs: 0 });
+  assert.equal(unconf.configured, false);
+  const failing = async () => { throw new Error('network down'); };
+  const out = await postJobSnapshot(job, { emit: () => {} }, {
+    env: { TELEGRAM_BOT_TOKEN: 'T', TELEGRAM_CHAT_ID: '-100123' }, fetchImpl: failing, retryDelayMs: 0,
+  });
+  assert.equal(out.configured, true);
+  assert.match(out.error, /network down/);
+});
+
+test('sendSourceToTelegram sends the source video; oversize and missing files skip, never throw', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-tg-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'source.mp4'), Buffer.alloc(100));
+  const calls = [];
+  const job = fakeJob(dir, [{ hook: 'HELLO' }]);
+  job.input.sourceFile = 'source.mp4';
+  const out = await sendSourceToTelegram(job, { emit: () => {} }, {
+    env: { TELEGRAM_BOT_TOKEN: 'TESTTOKEN', TELEGRAM_CHAT_ID: '-100123' },
+    fetchImpl: okFetch(calls), retryDelayMs: 0,
+  });
+  assert.equal(out.status, 'backed_up');
+  assert.match(calls[0].url, /sendVideo/);
+  assert.match(calls[0].init.body.get('caption'), new RegExp(`Wayne\\.clips job ${job.id} — source`));
+  assert.equal(job.telegram.source.fileId, 'FILEID1');
+  // Oversize (simulated with a tiny cap) and missing file both skip.
+  const big = await sendSourceToTelegram(job, { emit: () => {} }, {
+    env: { TELEGRAM_BOT_TOKEN: 'T', TELEGRAM_CHAT_ID: '-100123' }, fetchImpl: okFetch([]), retryDelayMs: 0, maxBytes: 10,
+  });
+  assert.equal(big.status, 'skipped_too_large');
+  const gone = fakeJob(dir, [{ hook: 'HELLO' }]);
+  gone.input.sourceFile = 'nope.mp4';
+  const miss = await sendSourceToTelegram(gone, { emit: () => {} }, {
+    env: { TELEGRAM_BOT_TOKEN: 'T', TELEGRAM_CHAT_ID: '-100123' }, fetchImpl: okFetch([]), retryDelayMs: 0,
+  });
+  assert.equal(miss.status, 'skipped_missing');
+});
+
+test('clip captions carry the job id and rank (restore can attribute channel messages)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-tg-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'clip-1.mp4'), Buffer.alloc(100));
+  const calls = [];
+  const job = fakeJob(dir, [{ hook: 'HELLO WORLD' }]);
+  await backupClipsToTelegram(job, { emit: () => {} }, {
+    env: { TELEGRAM_BOT_TOKEN: 'TESTTOKEN', TELEGRAM_CHAT_ID: '-100123' },
+    fetchImpl: okFetch(calls), retryDelayMs: 0,
+  });
+  const caption = calls[0].init.body.get('caption');
+  assert.match(caption, new RegExp(`job ${job.id}`));
+  assert.match(caption, /clip #1/);
+});
+
+test('listTelegramUpdates parses snapshot documents; restore round-trips a wiped job', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-tg-restore-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const jobId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const remoteJob = { id: jobId, updatedAt: '2026-11-22T08:00:00.000Z', status: 'running', input: { sourceFile: 'source.mp4' }, agents: {}, events: [] };
+  const fetchImpl = async (url) => {
+    if (url.includes('/getUpdates')) {
+      return { ok: true, json: async () => ({ ok: true, result: [
+        { update_id: 1, channel_post: { message_id: 10, date: 1795336000, chat: { id: -1003830374119, type: 'channel', title: 'Wayne.clips Cloud' }, document: { file_id: 'SNAP1', file_name: `${jobId}.json`, mime_type: 'application/json' }, caption: `Wayne.clips job ${jobId} — snapshot publish` } },
+        { update_id: 2, channel_post: { message_id: 11, date: 1795336001, chat: { id: -1003830374119, type: 'channel', title: 'Wayne.clips Cloud' }, video: { file_id: 'SRC1', file_unique_id: 'u1', mime_type: 'video/mp4', file_size: 4 }, caption: `Wayne.clips job ${jobId} — source` } },
+      ] }) };
+    }
+    if (url.includes('/getFile')) {
+      const fileId = new URL(url).searchParams.get('file_id');
+      const path = fileId === 'SNAP1' ? 'documents/snap.json' : 'videos/src.mp4';
+      return { ok: true, json: async () => ({ ok: true, result: { file_id: fileId, file_path: path, file_size: 4 } }) };
+    }
+    if (url.includes('/file/botT/documents/')) return { ok: true, arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(remoteJob)).buffer };
+    return { ok: true, arrayBuffer: async () => new TextEncoder().encode('FAKESOURCE').buffer };
+  };
+  const updates = await listTelegramUpdates({ token: 'T', fetchImpl });
+  assert.equal(updates.snapshots.length, 1);
+  assert.equal(updates.snapshots[0].jobId, jobId);
+  assert.equal(updates.snapshots[0].stage, 'publish');
+  const report = await restoreJobsFromTelegram({ jobsRoot: dir, token: 'T', fetchImpl });
+  assert.deepEqual(report.restored, [jobId]);
+  assert.deepEqual(report.sourceMissing, []);
+  const restored = JSON.parse(await (await import('node:fs/promises')).readFile(join(dir, jobId, 'job.json'), 'utf8'));
+  assert.equal(restored.id, jobId);
+  assert.equal((await (await import('node:fs/promises')).readFile(join(dir, jobId, 'source.mp4'))).toString(), 'FAKESOURCE');
 });

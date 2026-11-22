@@ -499,6 +499,9 @@ async function init() {
     }
   }
   window.__setScrollP = v => { pTarget = clamp01(v); };
+  // Let the app pause the 3D scene when the landing is hidden (Studio/Jobs
+  // views) — the RAF loop keeps ticking cheaply, the heavy render stops.
+  window.__sceneSetRunning = v => { running = !!v; };
   window.__sceneReady = 'ready';
   requestAnimationFrame(frame);
 }

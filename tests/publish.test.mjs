@@ -17,6 +17,17 @@ test('drafts carry title, caption and hashtags per platform', () => {
   assert.equal(d.status, 'draft');
 });
 
+test('a long hook is truncated, never throws — Publish must not fail a job over caption length', () => {
+  // Regression: the greedy-transcript hook "TODAY WE ARE GOING TO TALK
+  // ABOUT HOW SMALL CREATORS GROW FAST, FIRST HOOK THE VIEWER IN TWO
+  // SECONDS" (99 chars) made the caption 121 chars and failed Publish 3x.
+  const long = { rank: 1, hook: 'TODAY WE ARE GOING TO TALK ABOUT HOW SMALL CREATORS GROW FAST, FIRST HOOK THE VIEWER IN TWO SECONDS' };
+  const d = draftFor(long, 'YouTube', 'test');
+  assert.ok(d.caption.length <= 120, `caption is ${d.caption.length} chars`);
+  assert.match(d.caption, /… — cut by Wayne\.clips\.$/);
+  assert.equal(d.title.length <= 100, true);
+});
+
 test('approve ledger blocks a second approval for the same clip + platform', async (t) => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'wc-ledger-'));
   t.after(() => rm(dataRoot, { recursive: true, force: true }));

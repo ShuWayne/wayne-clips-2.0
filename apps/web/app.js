@@ -290,10 +290,12 @@ function showLanding() {
   $('.hud').hidden = false;
   $('#rail').hidden = false;
   $('#landing').style.display = ''; document.body.style.overflow = '';
+  if (window.__sceneSetRunning) window.__sceneSetRunning(true);
   onScrollLanding();
 }
 function showApp(html) {
   $('#landing').hidden = true; $('#app').hidden = false;
+  if (window.__sceneSetRunning) window.__sceneSetRunning(false);
   // The landing HUD (chapter rail, SCROLL / paste hint, sound button) is
   // landing-only: it must never float over Studio, Jobs or any app view.
   // Both .hud and #rail sit outside #landing, so hiding #landing alone
@@ -342,16 +344,21 @@ async function viewJob(id) {
   const render = async () => {
     try {
       const { job } = await api.get(`/api/jobs/${id}`);
+      // Skip the rebuild when nothing changed — a full innerHTML rewrite
+      // every poll resets scroll position and any playing clip preview.
+      if (lastSeen === job.updatedAt) return;
+      lastSeen = job.updatedAt;
       renderJob(job);
     } catch (e) { $('#job-body').innerHTML = `<p class="lede">Could not load this job: ${esc(e.message)}</p>`; }
   };
+  let lastSeen = null;
   await render();
   try {
     jobSSE = new EventSource(`/api/events?jobId=${id}`);
+    jobSSE.onopen = () => { clearInterval(jobPoll); jobPoll = null; };
     jobSSE.onmessage = ev => { const d = JSON.parse(ev.data); if (d.type === 'snapshot' || d.type === 'log' || d.type === 'status' || d.type === 'job') render(); };
-    jobSSE.onerror = () => { jobSSE.close(); jobSSE = null; jobPoll = setInterval(render, 3000); };
-  } catch { jobPoll = setInterval(render, 3000); }
-  jobPoll = jobPoll || setInterval(render, 5000);
+    jobSSE.onerror = () => { jobSSE.close(); jobSSE = null; if (!jobPoll) jobPoll = setInterval(render, 3000); };
+  } catch { if (!jobPoll) jobPoll = setInterval(render, 3000); }
 }
 function renderJob(job) {
   const done = AGENT_IDS_DONE(job);

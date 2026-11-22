@@ -15,7 +15,9 @@ def main():
     args = ap.parse_args()
     from faster_whisper import WhisperModel
     model = WhisperModel(args.model, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(args.audio, word_timestamps=True, language="en", vad_filter=True)
+    # Speed flags: greedy decoding (beam 1) + no previous-text conditioning.
+    # ~2-3x faster than the beam-5 default; word timestamps are unaffected.
+    segments, info = model.transcribe(args.audio, word_timestamps=True, language="en", vad_filter=True, beam_size=1, best_of=1, condition_on_previous_text=False)
     out_segments, out_words = [], []
     for seg in segments:
         words = []

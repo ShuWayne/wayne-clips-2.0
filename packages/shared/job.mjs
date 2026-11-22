@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { r2Config, mirrorJobJson, mirrorPut } from './store.mjs';
 
 export const AGENT_IDS = ['scout', 'ingest', 'viral', 'subtitle', 'effects', 'render', 'publish'];
 export const AGENT_NAMES = {
@@ -51,11 +52,18 @@ export function newJob(input, jobsRoot) {
   return job;
 }
 
-export async function saveJob(job) {
+export async function saveJob(job, opts = {}) {
   job.updatedAt = new Date().toISOString();
   const { dirAbs, ...persisted } = job;
   await mkdir(job.dirAbs, { recursive: true });
   await writeFile(join(job.dirAbs, 'job.json'), JSON.stringify(persisted, null, 2));
+  // Best-effort mirror to external storage (R2) — never fails the job.
+  // opts.r2config: explicit config (null = skip, e.g. in tests); when
+  // absent the env is read. opts.fetchImpl lets tests stub the network.
+  try {
+    const cfg = 'r2config' in opts ? opts.r2config : r2Config(process.env);
+    if (cfg) await mirrorJobJson({ config: cfg, job, fetchImpl: opts.fetchImpl, timeoutMs: opts.mirrorTimeoutMs ?? 5000 });
+  } catch (e) { console.error(`[store] job.json mirror failed for ${job.id}:`, e.message); }
   return job;
 }
 
@@ -91,9 +99,14 @@ export async function readLedger(dataRoot) {
   try { return JSON.parse(await readFile(await ledgerPath(dataRoot), 'utf8')); }
   catch { return { approvals: [] }; }
 }
-export async function writeLedger(dataRoot, ledger) {
+export async function writeLedger(dataRoot, ledger, opts = {}) {
   await mkdir(dataRoot, { recursive: true });
   await writeFile(await ledgerPath(dataRoot), JSON.stringify(ledger, null, 2));
+  // Best-effort mirror — the ledger is the one-upload-per-clip record.
+  try {
+    const cfg = 'r2config' in opts ? opts.r2config : r2Config(process.env);
+    if (cfg) await mirrorPut({ config: cfg, key: 'data/publish-ledger.json', body: JSON.stringify(ledger, null, 2), contentType: 'application/json', fetchImpl: opts.fetchImpl, timeoutMs: opts.mirrorTimeoutMs ?? 5000 });
+  } catch (e) { console.error('[store] ledger mirror failed:', e.message); }
 }
 export function ledgerKey(jobId, rank, platform) { return `${jobId}:${rank}:${platform.toLowerCase()}`; }
 export function countApprovalsToday(ledger) {

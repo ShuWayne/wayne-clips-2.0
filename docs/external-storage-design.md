@@ -67,3 +67,15 @@ Rejected:
 - Mirror skips cleanly when unconfigured; a store failure never fails a job.
 - Boot restore: remote job.json + source round-trip into an empty jobs dir.
 - Full suite green, then a local end-to-end job with the store stubbed on.
+
+## Implementation status (22 Nov 2026 ~13:45 IST)
+- `packages/shared/store.mjs`: SigV4 client + `mirrorPut` / `mirrorJobJson` /
+  `mirrorJobFile` / `restoreJobs` — all best-effort, never throw. Tests 10/10.
+- Wired: `saveJob` mirrors job.json; `writeLedger` mirrors the ledger;
+  `writeStore` (server) mirrors `data/*.json`; ingest mirrors the source
+  file; render mirrors clips + posters + sheets; boot restore runs before
+  listen; `storage` probe in health + toolkit.
+- NOT done yet: Shu's R2 credentials (account + bucket + API token) are not
+  in Render env, so live storage is still dormant — the code runs exactly as
+  today until they land. Deploy #2 carries this wiring (no deploy while a
+  job is rendering — 22 Nov's deploy wiped Shu's job 933332e6 mid-render).

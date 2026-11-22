@@ -5,7 +5,7 @@
 // backoff 5s x attempt); otherwise drafts + manual export, stated in the UI.
 // TikTok / Instagram: manual export only (no approved developer app).
 import { writeCaption, approvalChecklistValid, APPROVAL_CHECKLIST } from './guard.mjs';
-import { backupClipsToTelegram } from './telegram.mjs';
+import { backupClipsToTelegram, postJobSnapshot } from './telegram.mjs';
 import { askJson, NotConfigured, llmProvider } from '../packages/shared/llm.mjs';
 import { logEvent, setAgent, saveJob, readLedger, writeLedger, ledgerKey, countApprovalsToday } from '../packages/shared/job.mjs';
 
@@ -15,7 +15,13 @@ export function draftFor(clip, platform, niche) {
   const hook = (clip.captionText || clip.hook || 'Watch this').toLowerCase();
   const title = hook.charAt(0).toUpperCase() + hook.slice(1) + (niche ? ` — ${niche}` : '');
   const tags = ['#shorts', '#viral', ...(niche ? [`#${niche.replace(/[^a-z0-9]/gi, '').toLowerCase()}`] : [])].slice(0, 3);
-  const { caption } = writeCaption({ text: `${hook} — cut by Wayne.clips.`, hashtags: tags, platform });
+  // The caption guard throws over 120 chars, and a long transcript
+  // sentence can make the hook alone nearly that long — truncate the hook
+  // first so Publish can never fail the whole job over caption length.
+  const suffix = ' — cut by Wayne.clips.';
+  const maxHook = 120 - suffix.length;
+  const shortHook = hook.length > maxHook ? hook.slice(0, maxHook - 1).trimEnd() + '…' : hook;
+  const { caption } = writeCaption({ text: `${shortHook}${suffix}`, hashtags: tags, platform });
   return { rank: clip.rank, platform, title: title.slice(0, 100), caption, hashtags: tags, status: 'draft' };
 }
 
@@ -56,6 +62,8 @@ export async function runPublish(job, ctx) {
   // Telegram backup (never fails the job): finished clips go to Telegram
   // cloud right after render + QA, so they survive a wiped job disk.
   try { await backupClipsToTelegram(job, ctx); } catch { /* backup never fails publish */ }
+  // Telegram storage: final snapshot now includes the backup record.
+  await postJobSnapshot(job, ctx, { stage: 'publish' });
   return { drafts };
 }
 

@@ -7,6 +7,8 @@ import { copyFile } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { ffprobe, extractWav, run } from '../packages/shared/media.mjs';
 import { logEvent, setAgent, saveJob } from '../packages/shared/job.mjs';
+import { r2Config, mirrorJobFile } from '../packages/shared/store.mjs';
+import { sendSourceToTelegram, postJobSnapshot } from './telegram.mjs';
 
 const WHISPER_SCRIPT = new URL('../scripts/whisper.py', import.meta.url).pathname;
 
@@ -85,5 +87,12 @@ async function ingestOnce(job, ctx) {
   job.agents.ingest.output = output;
   setAgent(job, 'ingest', 'done', output, null, emit);
   await saveJob(job);
+  // Best-effort: mirror the source file — it is the input every later
+  // agent needs, so a wiped job can only resume if this copy survives.
+  const srcName = job.input.sourceFile || 'source.mp4';
+  await mirrorJobFile({ config: r2Config(process.env), jobId: job.id, dirAbs: job.dirAbs, filename: srcName, contentType: 'video/mp4' });
+  // Telegram storage: source video + job snapshot to the channel.
+  await sendSourceToTelegram(job, ctx);
+  await postJobSnapshot(job, ctx, { stage: 'ingest' });
   return output;
 }

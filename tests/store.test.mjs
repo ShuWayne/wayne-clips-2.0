@@ -92,3 +92,115 @@ test('r2Delete tolerates 404 and reports the key', async () => {
   assert.equal(out.configured, true);
   assert.equal(out.key, 'jobs/abc/job.json');
 });
+
+// --- Mirror + restore (wiring) ---
+
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { newJob, saveJob, writeLedger } from '../packages/shared/job.mjs';
+import { mirrorJobFile, restoreJobs } from '../packages/shared/store.mjs';
+
+// A fake R2 backed by an in-memory object: PUT records, GET serves bytes,
+// LIST returns XML keys for the requested prefix.
+function fakeR2Store(initial = {}) {
+  const store = { ...initial };
+  const puts = [];
+  const fetchImpl = async (url, init = {}) => {
+    const u = new URL(url);
+    if (u.searchParams.get('list-type') === '2') {
+      const prefix = u.searchParams.get('prefix') || '';
+      const keys = Object.keys(store).filter(k => k.startsWith(prefix));
+      const xml = `<ListBucketResult><IsTruncated>false</IsTruncated>${keys.map(k => `<Contents><Key>${k}</Key></Contents>`).join('')}</ListBucketResult>`;
+      return { ok: true, status: 200, text: async () => xml };
+    }
+    const key = decodeURIComponent(u.pathname.split('/').slice(2).join('/'));
+    if (init.method === 'PUT') {
+      puts.push({ key, body: init.body });
+      store[key] = Buffer.isBuffer(init.body) ? init.body : Buffer.from(init.body);
+      return { ok: true, status: 200, text: async () => '', arrayBuffer: async () => new ArrayBuffer(0) };
+    }
+    if (key in store) {
+      const buf = Buffer.isBuffer(store[key]) ? store[key] : Buffer.from(store[key]);
+      const exact = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      return { ok: true, status: 200, text: async () => buf.toString(), arrayBuffer: async () => exact };
+    }
+    return { ok: false, status: 404, text: async () => '', arrayBuffer: async () => new ArrayBuffer(0) };
+  };
+  return { store, puts, fetchImpl };
+}
+
+test('saveJob mirrors job.json when configured, skips when not, never fails on store error', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-save-'));
+  t.after(() => import('node:fs/promises').then(m => m.rm(dir, { recursive: true, force: true })));
+  const job = newJob({ sourceFile: 'source.mp4', rightsConfirmed: true, rightsBasis: 'owned' }, dir);
+  const { puts, fetchImpl } = fakeR2Store();
+  await saveJob(job, { r2config: CONFIG, fetchImpl });
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].key, `jobs/${job.id}/job.json`);
+  assert.equal(JSON.parse(puts[0].body.toString()).id, job.id);
+  // Local file still written.
+  assert.equal(JSON.parse(await readFile(join(dir, job.id, 'job.json'), 'utf8')).id, job.id);
+  // Unconfigured: no fetch, no throw.
+  const job2 = newJob({ sourceFile: 'source.mp4' }, dir);
+  await saveJob(job2, { r2config: null });
+  assert.equal(puts.length, 1);
+  // Failing store: saveJob still resolves and the local file exists.
+  const failing = async () => { throw new Error('network down'); };
+  const job3 = newJob({ sourceFile: 'source.mp4' }, dir);
+  await saveJob(job3, { r2config: CONFIG, fetchImpl: failing });
+  assert.equal(JSON.parse(await readFile(join(dir, job3.id, 'job.json'), 'utf8')).id, job3.id);
+});
+
+test('mirrorJobFile PUTs the bytes; missing file returns ok:false without throwing', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-mf-'));
+  t.after(() => import('node:fs/promises').then(m => m.rm(dir, { recursive: true, force: true })));
+  await writeFile(join(dir, 'clip-1.mp4'), Buffer.from('FAKECLIP'));
+  const { puts, fetchImpl } = fakeR2Store();
+  const out = await mirrorJobFile({ config: CONFIG, jobId: 'abc', dirAbs: dir, filename: 'clip-1.mp4', contentType: 'video/mp4', fetchImpl });
+  assert.equal(out.ok, true);
+  assert.equal(puts[0].key, 'jobs/abc/clip-1.mp4');
+  assert.equal(puts[0].body.toString(), 'FAKECLIP');
+  const miss = await mirrorJobFile({ config: CONFIG, jobId: 'abc', dirAbs: dir, filename: 'nope.mp4', fetchImpl });
+  assert.equal(miss.ok, false);
+  const unconf = await mirrorJobFile({ config: null, jobId: 'abc', dirAbs: dir, filename: 'clip-1.mp4', fetchImpl });
+  assert.equal(unconf.ok, false);
+  assert.equal(unconf.reason, 'unconfigured');
+});
+
+test('writeLedger mirrors the ledger; restoreJobs round-trips a wiped jobs dir', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'wc-restore-'));
+  t.after(() => import('node:fs/promises').then(m => m.rm(dir, { recursive: true, force: true })));
+  const { puts, fetchImpl } = fakeR2Store();
+  await writeLedger(dir, { approvals: [{ key: 'x', date: '2026-11-22' }] }, { r2config: CONFIG, fetchImpl });
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].key, 'data/publish-ledger.json');
+
+  // Remote: aaa = full job (job.json + source + clip), bbb = job.json only
+  // (source lost), ccc = remote older than the local copy (skip).
+  const remoteJob = (id, updatedAt) => JSON.stringify({ id, updatedAt, status: 'running', input: { sourceFile: 'source.mp4' }, agents: {}, events: [] });
+  const { fetchImpl: r2 } = fakeR2Store({
+    'jobs/aaa/job.json': remoteJob('aaa', '2026-11-22T10:00:00.000Z'),
+    'jobs/aaa/source.mp4': Buffer.from('FAKESOURCE'),
+    'jobs/aaa/clip-1.mp4': Buffer.from('FAKECLIP'),
+    'jobs/bbb/job.json': remoteJob('bbb', '2026-11-22T09:00:00.000Z'),
+    'jobs/ccc/job.json': remoteJob('ccc', '2026-11-22T10:00:00.000Z'),
+  });
+  await mkdir(join(dir, 'ccc'), { recursive: true });
+  await writeFile(join(dir, 'ccc', 'job.json'), JSON.stringify({ id: 'ccc', updatedAt: '2026-11-22T11:00:00.000Z', status: 'done', input: {}, agents: {}, events: [] }));
+  const report = await restoreJobs({ config: CONFIG, jobsRoot: dir, fetchImpl: r2 });
+  assert.deepEqual(report.restored, ['aaa']);
+  assert.deepEqual(report.skipped, ['ccc']);
+  assert.deepEqual(report.sourceMissing, ['bbb']);
+  // aaa fully restored on disk.
+  assert.equal(JSON.parse(await readFile(join(dir, 'aaa', 'job.json'), 'utf8')).id, 'aaa');
+  assert.equal((await readFile(join(dir, 'aaa', 'source.mp4'))).toString(), 'FAKESOURCE');
+  assert.equal((await readFile(join(dir, 'aaa', 'clip-1.mp4'))).toString(), 'FAKECLIP');
+  // bbb stays listed, marked failed with a plain-language error.
+  const bbb = JSON.parse(await readFile(join(dir, 'bbb', 'job.json'), 'utf8'));
+  assert.equal(bbb.status, 'failed');
+  assert.match(bbb.agents.ingest.error, /re-upload/);
+  // ccc local copy untouched (remote older).
+  assert.equal(JSON.parse(await readFile(join(dir, 'ccc', 'job.json'), 'utf8')).status, 'done');
+});

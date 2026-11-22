@@ -7,6 +7,8 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ffprobe, blackframeSeconds, run } from '../packages/shared/media.mjs';
 import { logEvent, setAgent, saveJob } from '../packages/shared/job.mjs';
+import { r2Config, mirrorJobFile } from '../packages/shared/store.mjs';
+import { postJobSnapshot } from './telegram.mjs';
 import { buildAss, checkAssSafeArea } from './subtitle.mjs';
 
 const RES = { '1080p': { w: 1080, h: 1920 }, '4K': { w: 2160, h: 3840 }, '8K': { w: 4320, h: 7680 } };
@@ -156,5 +158,15 @@ export async function runRender(job, ctx, { onlyRank = null, overrides = null } 
   job.agents.render.output = output;
   setAgent(job, 'render', results.every(r => r.qa[0] === 'passed') ? 'done' : 'degraded', output, null, emit);
   await saveJob(job);
+  // Best-effort: mirror the finished clips + posters + sheets, so a
+  // finished clip survives a wipe even before Publish backs it up.
+  const storeCfg = r2Config(process.env);
+  for (const rec of results) {
+    for (const f of [rec.file, rec.poster, rec.sheet].filter(Boolean)) {
+      await mirrorJobFile({ config: storeCfg, jobId: job.id, dirAbs: job.dirAbs, filename: f, contentType: f.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg' });
+    }
+  }
+  // Telegram storage: job snapshot to the channel (clips go at Publish).
+  await postJobSnapshot(job, ctx, { stage: 'render' });
   return output;
 }
