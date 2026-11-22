@@ -33,6 +33,24 @@ function toast(msg) {
   $('#live').textContent = msg;
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 3600);
 }
+// ---------- clip viewer ----------
+// Opens only when called with a real clip (job clip cards). Never opened on load.
+let viewerCtx = null;
+function openViewer({ src, poster, caption, meta, jobId, rank }) {
+  const v = $('#viewer-video');
+  v.src = src; if (poster) v.poster = poster;
+  $('#viewer-cap').textContent = caption || '';
+  $('#viewer-meta').textContent = meta || '';
+  viewerCtx = { jobId, rank };
+  $('#viewer').hidden = false;
+  $('#viewer-close').focus();
+}
+function closeViewer() {
+  const v = $('#viewer-video');
+  v.pause(); v.removeAttribute('src'); v.load();
+  viewerCtx = null;
+  $('#viewer').hidden = true;
+}
 
 // ---------- landing: scroll chapters, nav, HUD ----------
 const CHAPTERS = [
@@ -262,7 +280,7 @@ function renderJob(job) {
         <div class="body"><h4>#${c.rank} — ${esc(c.captionText || c.hook)}</h4>
         <div class="meta">${c.start.toFixed(1)}s – ${c.end.toFixed(1)}s · score ${c.score} · ${esc(c.captionStyle || '')}</div>
         <div class="qa">${(r ? [...r.qa, ...(r.warnings || [])] : ['queued']).map(q => `<span class="tag ${/passed/.test(q) ? 'ok' : /pending|upscaled/.test(q) ? 'warn' : 'mint'}">${esc(q)}</span>`).join('')}${r?.upscaled > 1 ? `<span class="tag warn">upscaled ×${r.upscaled}</span>` : ''}</div>
-        ${file ? `<div class="row"><a class="btn ghost sm" href="${file}" download>Download MP4</a><a class="btn ghost sm" href="#/studio?job=${job.id}&clip=${c.rank}">Open in Studio</a></div>` : ''}
+        ${file ? `<div class="row"><button class="btn ghost sm" data-view="${c.rank}">View</button><a class="btn ghost sm" href="${file}" download>Download MP4</a><a class="btn ghost sm" href="#/studio?job=${job.id}&clip=${c.rank}">Open in Studio</a></div>` : ''}
         <div class="row"><select id="regen-style-${c.rank}" aria-label="Caption style"><option value="pop">pop</option><option value="bounce">bounce</option><option value="karaoke">karaoke</option></select>
         <button class="btn ghost sm" data-regen="${c.rank}">Regenerate</button></div>
         </div></article>`;
@@ -278,6 +296,19 @@ function renderJob(job) {
         ${CHECKLIST.map((c, i) => `<label class="check"><input type="checkbox" data-ck="${i}"> <span>${esc(c)}</span></label>`).join('')}
         <button class="btn mint sm" data-confirm-approve="${d.rank}:${d.platform}" style="margin-top:10px">Confirm approval</button>
       </div></article>`).join('') || '<p class="lede">No drafts yet.</p>'}</div>`;
+  $$('[data-view]').forEach(b => b.addEventListener('click', () => {
+    const rank = +b.dataset.view;
+    const c = clips.find(x => x.rank === rank);
+    const r = byRank[rank];
+    if (!c || !r) return;
+    openViewer({
+      src: `/files/${job.id}/${r.file}`,
+      poster: `/files/${job.id}/${r.poster}`,
+      caption: c.captionText || c.hook,
+      meta: `#${rank} · ${c.start.toFixed(1)}s–${c.end.toFixed(1)}s · score ${c.score} · rights: ${job.input.rightsBasis} (confirmed)`,
+      jobId: job.id, rank,
+    });
+  }));
   $$('[data-regen]').forEach(b => b.addEventListener('click', async () => {
     const rank = +b.dataset.regen;
     const style = $(`#regen-style-${rank}`).value;
@@ -726,11 +757,18 @@ function init() {
   $('#cmdk-btn').addEventListener('click', openPalette);
   $('#sound-btn').addEventListener('click', toggleSound);
   $('#account-btn').addEventListener('click', () => location.hash = '#/settings');
-  $('#viewer-close').addEventListener('click', () => { $('#viewer').hidden = true; const v = $('#viewer-video'); v.pause(); v.removeAttribute('src'); v.load(); });
+  $('#viewer-close').addEventListener('click', closeViewer);
+  $('#viewer').addEventListener('click', e => { if (e.target === $('#viewer')) closeViewer(); });
+  $('#viewer-studio').addEventListener('click', () => {
+    if (!viewerCtx) return;
+    const { jobId, rank } = viewerCtx;
+    closeViewer();
+    location.hash = `#/studio?job=${jobId}&clip=${rank}`;
+  });
   document.addEventListener('keydown', e => {
     const inInput = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '');
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#palette').hidden ? openPalette() : closePalette(); return; }
-    if (e.key === 'Escape') closePalette();
+    if (e.key === 'Escape') { closePalette(); if (!$('#viewer').hidden) closeViewer(); }
     if (!inInput && /^[1-6]$/.test(e.key) && !$('#landing').hidden) jumpToChapter(+e.key - 1);
   });
   document.addEventListener('paste', async e => {

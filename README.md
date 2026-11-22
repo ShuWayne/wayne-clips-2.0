@@ -62,6 +62,7 @@ Verified in this sandbox (22 Nov 2026, see `npm test` output and `scripts/e2e.mj
 - End-to-end over real HTTP (`scripts/e2e.mjs`, clean re-run job `4edf73f8-d9f1-4338-9698-30f4e11d459e`, **30/30 checks passed**): file-upload job runs all seven agents to `done`, 3 clips + 9 drafts; ffprobe on the earlier E2E job's rendered files (`2f67ba9d-d21c-4501-bb92-949da01f06d0`) — clip #1 1080×1920 h264+aac 26.9 s, clip #2 1080×1920 29.0 s, clip #3 1080×1920 24.7 s; posters + contact sheets on disk; Range serving returns 206; path traversal blocked (400); take-over regenerate applies overrides (caption "E2E TAKEOVER"); approve works once (200) and the ledger blocks the second approval (409).
 - Rights gate: URL job without `rightsConfirmed` is rejected with 400.
 - Earnings formula reproduces the spec example exactly (11,111,112 views).
+- **Viewer bug fixed 22 Nov 2026 (found on the live Render deploy):** the Clip viewer dialog opened on first load and its Close button / Escape did nothing. Root cause: `.viewer{display:flex}` (and `.no-webgl{display:flex}`) overrode the `hidden` attribute. Fixed with a global `[hidden]{display:none!important}` rule, plus Escape/backdrop close, and the viewer is now only opened from a job clip card's View button (with the real rendered file, caption and rights basis) — never on load. Verified by `node --check` + local server smoke test; live re-check pending after Render redeploys.
 
 Not verified / not working:
 
