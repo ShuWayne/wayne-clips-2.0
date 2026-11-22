@@ -262,6 +262,11 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
   .chapter{padding:0 6vw}
   .rail{left:12px}
   .hud-bl{left:12px}
+  .stepbar{font-size:10px;padding:6px 8px;gap:8px}
+  .stepbar span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .stepbar .cur{flex:none}
+  /* Crop label sits at the cropbox's top-left; keep the source tag clear of it. */
+  .program .src-tag{left:auto;right:10px}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.01ms !important;transition-duration:.01ms !important}

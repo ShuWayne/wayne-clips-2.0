@@ -212,11 +212,15 @@ const routes = {
 };
 function showLanding() {
   $('#landing').hidden = false; $('#app').hidden = true;
+  $('.hud').hidden = false;
   $('#landing').style.display = ''; document.body.style.overflow = '';
   onScrollLanding();
 }
 function showApp(html) {
   $('#landing').hidden = true; $('#app').hidden = false;
+  // The landing HUD (chapter rail, SCROLL / paste hint, sound button) is
+  // landing-only: it must never float over Studio, Jobs or any app view.
+  $('.hud').hidden = true;
   $('#app').innerHTML = `<div class="view">${html}</div>`;
   scrollTo(0, 0);
 }
@@ -264,7 +268,11 @@ function renderJob(job) {
   const clips = job.clips || [];
   const renderResults = job.agents.render.output?.results || [];
   const byRank = Object.fromEntries(renderResults.map(r => [r.rank, r]));
+  // YouTube blocks downloads from cloud servers with a bot-check; say so in
+  // plain words instead of leaving the raw yt-dlp error as the only clue.
+  const blocked = /bot|sign in to confirm/i.test(job.agents?.ingest?.error || '');
   $('#job-body').innerHTML = `
+    ${job.status === 'failed' && blocked ? `<div class="banner"><b>YOUTUBE BLOCKED THE DOWNLOAD</b><span>YouTube refused this link from the server (bot-check on a cloud IP). Upload the video file instead — Paste a link → drop a file — or use a direct .mp4 link. No setting on this site can force YouTube to accept datacentre downloads.</span></div>` : ''}
     <div class="panel glass"><h2>Pipeline <span class="mono">${esc(job.status.toUpperCase())}</span></h2>
       <div class="progress-steps">${AGENTS.map(([aid, n]) => `<span class="${job.agents[aid].status}">${n} — ${job.agents[aid].status}</span>`).join('')}</div>
       <div class="bar"><i style="width:${(done / 7) * 100}%"></i></div>
