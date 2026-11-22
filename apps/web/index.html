@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wayne.clips — The place for every clipper and creator</title>
+<meta name="description" content="Paste a link. Seven AI agents find the moments, cut, caption, render and prepare the upload. You approve.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23EE5FA7'/><text x='16' y='22' font-size='18' font-family='Arial' font-weight='bold' text-anchor='middle' fill='%2307040C'>W</text></svg>">
+<link rel="stylesheet" href="/styles.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<a class="skip" href="#app">Skip to the app</a>
+<canvas id="gl" aria-hidden="true"></canvas>
+<div id="no-webgl" class="no-webgl" hidden>
+  <div class="nw-card">
+    <div class="logo">Wayne<span>.clips</span></div>
+    <p>Your browser has no WebGL or reduced motion is on — the 3D shatter is off, but every chapter below works the same.</p>
+    <button class="btn primary" data-goto="#/">Continue to the chapters ↓</button>
+  </div>
+</div>
+
+<header class="nav" id="nav">
+  <a class="logo" href="#/" aria-label="Wayne.clips home">Wayne<span>.clips</span></a>
+  <nav class="nav-links" aria-label="Main">
+    <a href="#/studio">Studio</a><a href="#/scout">Scout</a><a href="#/playbook">Playbook</a><a href="#/hub">Hub</a><a href="#/settings">Docs</a>
+  </nav>
+  <div class="nav-right">
+    <button class="kbd-pill" id="cmdk-btn" title="Command palette (Ctrl/⌘ K)">⌘K</button>
+    <button class="btn primary sm" id="nav-paste">Paste a link</button>
+    <button class="icon-btn" id="account-btn" aria-label="Account">◉</button>
+  </div>
+</header>
+
+<aside class="hud" aria-hidden="false">
+  <div class="rail" id="rail" role="navigation" aria-label="Chapters"></div>
+  <div class="hud-bl"><span>SCROLL</span><i></i></div>
+  <div class="hud-bc">⌘V&nbsp;&nbsp;PASTE A LINK ANYWHERE</div>
+  <button class="hud-br" id="sound-btn">SOUND OFF</button>
+</aside>
+
+<main id="landing">
+  <div id="track" aria-hidden="true"></div>
+  <section class="chapter ch0" data-ch="0">
+    <div class="mask"><span class="kicker">THE PLACE FOR EVERY CLIPPER AND CREATOR</span></div>
+    <div class="mask"><span class="sub">Paste a link. Seven AI agents do the rest.</span></div>
+  </section>
+  <section class="chapter ch1" data-ch="1">
+    <div class="mask"><h1>ONE LINK IN.<br><em>EVERY CLIP OUT.</em></h1></div>
+    <div class="mask"><p class="sub">Wayne.clips finds the moments, cuts, captions, renders and prepares the upload. You approve.</p></div>
+  </section>
+  <section class="chapter ch2" data-ch="2">
+    <div class="mask"><h2>SEVEN AGENTS.<br>ONE JOB FILE.</h2></div>
+    <ol class="agent-list" id="agent-list"></ol>
+    <div class="agent-focus glass" id="agent-focus" hidden></div>
+  </section>
+  <section class="chapter ch3" data-ch="3">
+    <div class="mask"><h2>NO TIMELINE<br>TO TOUCH.</h2></div>
+    <div class="mask"><p class="sub">Watch an agent edit. Take over any keyframe whenever you want.</p></div>
+    <ol class="steps" id="landing-steps"></ol>
+    <div class="studio-mini glass" id="studio-mini">
+      <div class="sm-top"><span class="dot"></span><span id="sm-step">01 / CAPTURE — DROP / Bring the source in</span><span class="mono" id="sm-time">00.00 / 30.00</span></div>
+      <div class="sm-bar"><i id="sm-progress"></i></div>
+      <div class="sm-caption" id="sm-caption">NEW CAPTION.</div>
+      <button class="btn ghost sm" data-goto="#/studio">Open the Studio →</button>
+    </div>
+  </section>
+  <section class="chapter ch4" data-ch="4">
+    <div class="hub-cards">
+      <article class="glass hub-card"><h3>Clippers</h3><p>Find rights-cleared sources, run your pages, track every clip.</p><a href="#/scout">OPEN →</a></article>
+      <article class="glass hub-card"><h3>Creators</h3><p>Open your library on your terms: licence, attribution, expiry.</p><a href="#/hub">OPEN →</a></article>
+      <article class="glass hub-card"><h3>Campaigns</h3><p>Post rules and rates. Only verified views count.</p><a href="#/hub">OPEN →</a></article>
+    </div>
+  </section>
+  <section class="chapter ch5" data-ch="5">
+    <div class="finale">
+      <div class="logo big">Wayne<span>.clips</span></div>
+      <div id="linkbox-slot"></div>
+      <footer class="foot">
+        <a href="#/playbook">Docs</a><a href="#/playbook">Rights policy</a>
+        <span id="limits-foot">Platform limits — last checked …</span><a href="#/settings">Privacy</a>
+      </footer>
+    </div>
+  </section>
+</main>
+
+<main id="app" hidden></main>
+
+<div id="palette" class="palette" hidden role="dialog" aria-label="Command palette">
+  <input id="palette-input" placeholder="Type a command — jump, studio, scout, paste a link…" aria-label="Command">
+  <ul id="palette-list"></ul>
+</div>
+<div id="viewer" class="viewer" hidden role="dialog" aria-label="Clip viewer">
+  <div class="viewer-card glass">
+    <button class="icon-btn viewer-close" id="viewer-close" aria-label="Close">✕</button>
+    <video id="viewer-video" controls playsinline></video>
+    <div class="viewer-cap" id="viewer-cap"></div>
+    <div class="viewer-meta" id="viewer-meta"></div>
+    <button class="btn primary" id="viewer-studio">Open in Studio →</button>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="live" class="sr-only" aria-live="polite"></div>
+
+<script src="/app.js" defer></script>
+<script type="module" src="/scene.js"></script>
+</body>
+</html>

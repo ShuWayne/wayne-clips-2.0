@@ -1,0 +1,30 @@
+# Render — Docker runtime web service. The parent (or Shu) deploys this;
+# nothing here deploys itself. Set ANTHROPIC_API_KEY / YOUTUBE_API_KEY /
+# YOUTUBE_ACCESS_TOKEN in the Render dashboard when they exist — the app
+# runs without them and says so in the UI.
+services:
+  - type: web
+    name: wayne-clips
+    runtime: docker
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: DAILY_UPLOAD_CAP
+        value: 10
+      - key: MAX_CLIPS_PER_JOB
+        value: 6
+      - key: WHISPER_MODEL
+        value: tiny
+      # Uncomment and set in the dashboard when available:
+      # - key: ANTHROPIC_API_KEY
+      #   sync: false
+      # - key: YOUTUBE_API_KEY
+      #   sync: false
+      # - key: YOUTUBE_ACCESS_TOKEN
+      #   sync: false
+    healthCheckPath: /api/health
