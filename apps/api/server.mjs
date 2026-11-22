@@ -12,6 +12,8 @@ import { validateJobInput } from '../../agents/guard.mjs';
 import { run as runOrchestrator, regenerateClip } from '../../packages/orchestrator/run.mjs';
 import { runScout } from '../../agents/scout.mjs';
 import { approvePublish } from '../../agents/publish.mjs';
+import { listTelegramUpdates, downloadTelegramFile } from '../../agents/telegram.mjs';
+import { validateInitData, createSessionToken, verifySessionToken } from '../../agents/telegram-auth.mjs';
 import { run as mediaRun } from '../../packages/shared/media.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -65,9 +67,13 @@ async function readJsonBody(req) {
 }
 function requireAuth(req, res) {
   const token = process.env.API_TOKEN;
-  if (!token) return true;
   const url = new URL(req.url, 'http://x');
   const got = req.headers.authorization?.replace(/^Bearer\s+/i, '') || url.searchParams.get('token');
+  // A valid Telegram Mini App session is an identity too — the Mini App
+  // user is the site user. Checked first so a session works even when
+  // API_TOKEN is set; when neither is configured the API stays open.
+  if (got && process.env.TELEGRAM_BOT_TOKEN && verifySessionToken(got, process.env.TELEGRAM_BOT_TOKEN)) return true;
+  if (!token) return true;
   if (got !== token) { sendErr(res, 401, 'missing or invalid API token'); return false; }
   return true;
 }
@@ -167,6 +173,7 @@ async function probeToolkit() {
   probes.push({ id: 'openai', name: 'OpenAI API (GPT-6)', version: process.env.OPENAI_API_KEY ? (process.env.OPENAI_MODEL || 'gpt-6.2-sol') : null, status: process.env.OPENAI_API_KEY ? 'connected' : 'not_connected', note: process.env.OPENAI_API_KEY ? '' : 'No OPENAI_API_KEY — Claude is tried first; without either key the heuristic fallback is used and the log says so.' });
   probes.push({ id: 'youtube', name: 'YouTube Data API', version: null, status: process.env.YOUTUBE_API_KEY ? 'connected' : 'not_connected', note: process.env.YOUTUBE_API_KEY ? '' : 'No YOUTUBE_API_KEY — Scout cannot read live YouTube metadata.' });
   probes.push({ id: 'youtube-upload', name: 'YouTube upload', version: null, status: process.env.YOUTUBE_ACCESS_TOKEN ? 'connected' : 'not_connected', note: process.env.YOUTUBE_ACCESS_TOKEN ? 'Uploads go live as private videos after approval.' : 'No YOUTUBE_ACCESS_TOKEN — approvals are manual-export only.' });
+  probes.push({ id: 'telegram', name: 'Telegram backup', version: null, status: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'connected' : 'not_connected', note: (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) ? 'Finished clips are pushed to Telegram cloud after render + QA.' : 'No TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — finished clips are not backed up off the job disk.' });
   probes.push({ id: 'redis', name: 'Redis / BullMQ queue', version: null, status: 'not_connected', note: 'Not configured — the in-process queue is used instead.' });
   probes.push({ id: 'libass', name: 'libass caption burn-in', version: null, status: probes.find(p => p.id === 'ffmpeg')?.status === 'connected' ? 'connected' : 'not_connected', note: 'Ships with FFmpeg; unavailable while FFmpeg is unavailable.' });
   probes.push({ id: 'reframe', name: 'Reframe engine', version: null, status: probes.find(p => p.id === 'ffmpeg')?.status === 'connected' ? 'connected' : 'not_connected', note: 'Runs on FFmpeg crops; unavailable while FFmpeg is unavailable.' });
@@ -179,7 +186,7 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (path === '/api/health' && method === 'GET') {
-    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, openai: !!process.env.OPENAI_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY } });
+    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, openai: !!process.env.OPENAI_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY, telegram: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) } });
   }
   if (path === '/api/toolkit' && method === 'GET') {
     return sendJson(res, 200, { ok: true, tools: await probeToolkit() });
@@ -260,6 +267,7 @@ async function handleApi(req, res, url) {
         captionStyle: parsed.fields.captionStyle || 'pop',
         pageId: parsed.fields.pageId || null,
         licenceId: parsed.fields.licenceId || null,
+        telegramChatId: (parsed.fields.telegramChatId || '').trim(),
       };
       uploadedFile = parsed.file;
       if (uploadedFile) input._uploadTmp = { dir: tmpDir, path: uploadedFile.path, filename: uploadedFile.filename };
@@ -285,6 +293,77 @@ async function handleApi(req, res, url) {
       .catch(err => console.error('orchestrator error', job.id, err));
     return sendJson(res, 201, { ok: true, id: job.id, job: stripJob(job) });
   }
+
+  // ---- telegram: backup destination + import from the bot ----
+  // POST /api/telegram/session — exchange Mini App initData for a session.
+  // Validates Telegram's HMAC (tampered or stale initData → 401), then
+  // returns the Telegram user id + a 24h session token. The bot token
+  // never leaves the server.
+  if (path === '/api/telegram/session' && method === 'POST') {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return sendErr(res, 503, 'Telegram is not configured — set TELEGRAM_BOT_TOKEN in Render env first.');
+    const body = await readJsonBody(req).catch(() => ({}));
+    try {
+      const user = validateInitData(body.initData || '', token);
+      return sendJson(res, 200, { ok: true, telegramUserId: String(user.id), username: user.username || null, firstName: user.first_name || null, sessionToken: createSessionToken(String(user.id), token) });
+    } catch (e) {
+      return sendErr(res, 401, `Telegram session failed: ${e.message}`);
+    }
+  }
+  // GET /api/telegram/updates — videos the user sent to the bot, plus who
+  // tapped /start (connect flow). Works without a token (configured:false).
+  if (path === '/api/telegram/updates' && method === 'GET') {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return sendJson(res, 200, { ok: true, configured: false, botUsername: process.env.TELEGRAM_BOT_USERNAME || null, defaultChatId: process.env.TELEGRAM_CHAT_ID || null, videos: [], starters: [], channels: [] });
+    try {
+      const { videos, starters, channels } = await listTelegramUpdates({ token });
+      return sendJson(res, 200, { ok: true, configured: true, botUsername: process.env.TELEGRAM_BOT_USERNAME || null, defaultChatId: process.env.TELEGRAM_CHAT_ID || null, videos, starters, channels });
+    } catch (e) { return sendErr(res, 502, `Telegram updates failed: ${e.message}`); }
+  }
+  // POST /api/telegram/import — download a video the user sent to the bot
+  // (from Telegram's servers, not YouTube) and run it as a job. Bot API
+  // downloads cap at 20 MB; bigger files must use the New Job form upload.
+  if (path === '/api/telegram/import' && method === 'POST') {
+    if (!requireAuth(req, res)) return;
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return sendErr(res, 503, 'Telegram is not configured — set TELEGRAM_BOT_TOKEN in Render env first.');
+    const body = await readJsonBody(req).catch(() => ({}));
+    if (!body.fileId) return sendErr(res, 400, 'fileId is required — pick a video from GET /api/telegram/updates');
+    const input = {
+      sourceUrl: '', sourceFile: 'telegram',
+      rightsConfirmed: body.rightsConfirmed === true, rightsBasis: body.rightsBasis || 'user_asserted',
+      formats: body.formats || ['9:16'], resolutions: body.resolutions || ['1080p'],
+      niche: body.niche || '', uploadMode: body.uploadMode || 'review', captionStyle: body.captionStyle || 'pop',
+      pageId: body.pageId || null, licenceId: body.licenceId || null,
+      telegramChatId: String(body.telegramChatId || '').trim(),
+    };
+    const errors = validateJobInput(input);
+    if (errors.length) return sendErr(res, 400, errors.join(' | '));
+    await mkdir(JOBS_ROOT, { recursive: true });
+    const tmpDir = join(JOBS_ROOT, '.tg-' + randomUUID().slice(0, 8));
+    await mkdir(tmpDir, { recursive: true });
+    const dest = join(tmpDir, 'source.mp4');
+    try {
+      await downloadTelegramFile({ token, fileId: body.fileId, destPath: dest });
+    } catch (e) {
+      const { rm } = await import('node:fs/promises');
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      return sendErr(res, 400, e.message);
+    }
+    const job = newJob(input, JOBS_ROOT);
+    await mkdir(job.dirAbs, { recursive: true });
+    await copyFile(dest, join(job.dirAbs, 'source.mp4'));
+    job.input.sourceFile = 'source.mp4';
+    job.input.sourceUrl = null;
+    const { rm } = await import('node:fs/promises');
+    await rm(tmpDir, { recursive: true, force: true });
+    await saveJob(job);
+    logEvent(job, 'scout', 'running', 'Job received from Telegram — Scout is scanning the opportunity around this source.', emitFor(job));
+    runOrchestrator(job, { emit: emitFor(job), ctx: { dataRoot: DATA_ROOT, jobsRoot: JOBS_ROOT, licences: await getLicences() } })
+      .catch(err => console.error('orchestrator error', job.id, err));
+    return sendJson(res, 201, { ok: true, id: job.id, job: stripJob(job) });
+  }
+
   const jobMatch = path.match(/^\/api\/jobs\/([0-9a-f-]{36})(?:\/(.*))?$/);
   if (jobMatch) {
     const [, id, rest] = jobMatch;

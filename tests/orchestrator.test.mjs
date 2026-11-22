@@ -48,7 +48,7 @@ test('orchestrator runs all seven agents in order on a real file and persists jo
   }
 });
 
-test('orchestrator fails honestly when the transcript is empty (voiceover needed)', async (t) => {
+test('orchestrator completes a speechless video via visual moments (no voiceover needed)', async (t) => {
   const jobsRoot = await mkdtemp(join(tmpdir(), 'wc-orch-tone-'));
   const dataRoot = await mkdtemp(join(tmpdir(), 'wc-orch-tone-data-'));
   t.after(() => { rm(jobsRoot, { recursive: true, force: true }); rm(dataRoot, { recursive: true, force: true }); });
@@ -57,8 +57,38 @@ test('orchestrator fails honestly when the transcript is empty (voiceover needed
   await mkdir(job.dirAbs, { recursive: true });
   await copyFile(new URL('./fixtures/tone-video.mp4', import.meta.url).pathname, join(job.dirAbs, 'source.mp4'));
   await run(job, { emit: () => {}, ctx: { dataRoot, jobsRoot, licences: [] } });
+  assert.equal(job.status, 'done', `job failed: ${job.agents.viral.error || ''}`);
+  assert.equal(job.agents.viral.status, 'done');
+  assert.equal(job.agents.viral.output.engine, 'visual');
+  assert.ok(job.clips.length >= 1);
+  assert.ok(job.drafts.length >= 3);
+  // The visual clip actually rendered — 1080x1920 with the hook burned in.
+  const f = join(job.dirAbs, 'clip-1.mp4');
+  assert.ok(existsSync(f), 'clip file exists');
+  const p = await ffprobe(f);
+  assert.equal(p.width, 1080);
+  assert.equal(p.height, 1920);
+});
+
+test('orchestrator fails fast (1 attempt, not 3) on a deterministic viral error', async (t) => {
+  const jobsRoot = await mkdtemp(join(tmpdir(), 'wc-orch-short-'));
+  const dataRoot = await mkdtemp(join(tmpdir(), 'wc-orch-short-data-'));
+  t.after(() => { rm(jobsRoot, { recursive: true, force: true }); rm(dataRoot, { recursive: true, force: true }); });
+  const job = newJob({ sourceUrl: null, sourceFile: 'source.mp4', rightsConfirmed: true, rightsBasis: 'owned', formats: ['9:16'], resolutions: ['1080p'], niche: 'test', uploadMode: 'review', captionStyle: 'pop' }, jobsRoot);
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(job.dirAbs, { recursive: true });
+  // 3s silent video: too short to cut without speech — a deterministic error.
+  const { execFile } = await import('node:child_process');
+  await new Promise((resolve, reject) => execFile('ffmpeg', [
+    '-y', '-v', 'error',
+    '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:r=30:d=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:d=3',
+    '-c:v', 'libx264', '-c:a', 'aac', '-shortest',
+    join(job.dirAbs, 'source.mp4'),
+  ], (err) => err ? reject(err) : resolve()));
+  await run(job, { emit: () => {}, ctx: { dataRoot, jobsRoot, licences: [] } });
   assert.equal(job.status, 'failed');
   assert.equal(job.agents.viral.status, 'failed');
-  assert.match(job.agents.viral.error || '', /voiceover needed/i);
-  assert.equal(job.clips.length, 0);
+  assert.equal(job.agents.viral.attempts, 1, 'deterministic errors must not be retried');
+  assert.match(job.agents.viral.error || '', /too short/);
 });

@@ -5,6 +5,7 @@
 // backoff 5s x attempt); otherwise drafts + manual export, stated in the UI.
 // TikTok / Instagram: manual export only (no approved developer app).
 import { writeCaption, approvalChecklistValid, APPROVAL_CHECKLIST } from './guard.mjs';
+import { backupClipsToTelegram } from './telegram.mjs';
 import { askJson, NotConfigured, llmProvider } from '../packages/shared/llm.mjs';
 import { logEvent, setAgent, saveJob, readLedger, writeLedger, ledgerKey, countApprovalsToday } from '../packages/shared/job.mjs';
 
@@ -52,6 +53,9 @@ export async function runPublish(job, ctx) {
   job.agents.publish.output = { drafts: drafts.length };
   setAgent(job, 'publish', 'done', { drafts: drafts.length }, null, emit);
   await saveJob(job);
+  // Telegram backup (never fails the job): finished clips go to Telegram
+  // cloud right after render + QA, so they survive a wiped job disk.
+  try { await backupClipsToTelegram(job, ctx); } catch { /* backup never fails publish */ }
   return { drafts };
 }
 

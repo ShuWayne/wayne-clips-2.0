@@ -19,15 +19,47 @@ const CHECKLIST = [
   'Caption has no false claim?', 'Disclosure added if sponsored?',
 ];
 
+const tgSession = () => (localStorage.getItem('wc-telegram-session') || '').trim();
+const tgAuthHeaders = () => tgSession() ? { authorization: `Bearer ${tgSession()}` } : {};
 const api = {
-  async get(p) { const r = await fetch(p); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `GET ${p} failed (${r.status})`); return r.json(); },
+  async get(p) { const r = await fetch(p, { headers: tgAuthHeaders() }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `GET ${p} failed (${r.status})`); return r.json(); },
   async post(p, body, isForm = false) {
-    const r = await fetch(p, { method: 'POST', body: isForm ? body : JSON.stringify(body || {}), headers: isForm ? {} : { 'content-type': 'application/json' } });
+    const r = await fetch(p, { method: 'POST', body: isForm ? body : JSON.stringify(body || {}), headers: isForm ? tgAuthHeaders() : { 'content-type': 'application/json', ...tgAuthHeaders() } });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `POST ${p} failed (${r.status})`);
     return r.json();
   },
-  async del(p) { const r = await fetch(p, { method: 'DELETE' }); if (!r.ok) throw new Error('delete failed'); return r.json(); },
+  async del(p) { const r = await fetch(p, { method: 'DELETE', headers: tgAuthHeaders() }); if (!r.ok) throw new Error('delete failed'); return r.json(); },
 };
+// ---------- Telegram Mini App ----------
+// Detects window.Telegram.WebApp; outside Telegram every helper is a no-op
+// and the site behaves exactly as the plain web app.
+const tgApp = () => (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData) ? window.Telegram.WebApp : null;
+const tgHaptic = (style = 'light') => { try { tgApp()?.HapticFeedback?.impactOccurred(style); } catch {} };
+async function initTelegram() {
+  const tg = tgApp();
+  if (!tg) return;
+  try { tg.ready(); tg.expand(); } catch {}
+  try { tg.setHeaderColor('#07040C'); tg.setBackgroundColor('#07040C'); } catch {}
+  // BackButton: go back in the app's hash history, hidden on the landing.
+  try {
+    tg.BackButton.onClick(() => history.back());
+    if ((location.hash || '#/') !== '#/') tg.BackButton.show();
+  } catch {}
+  // Exchange initData for a session: the server validates Telegram's HMAC,
+  // then this browser holds a 24h token + the user id. The chat id lands in
+  // the same localStorage key the Settings connect flow uses, so finished
+  // clips auto-save to this user with no extra setup.
+  try {
+    const s = await api.post('/api/telegram/session', { initData: tg.initData });
+    if (s.telegramUserId) {
+      localStorage.setItem('wc-telegram-chat-id', s.telegramUserId);
+      localStorage.setItem('wc-telegram-session', s.sessionToken);
+      const who = s.username ? `@${s.username}` : (s.firstName || 'you');
+      const acc = $('#account-btn'); if (acc) { acc.title = `Telegram: ${who}`; acc.setAttribute('aria-label', `Account — Telegram ${who}`); }
+      toast(`Opened in Telegram as ${who} — finished clips auto-save to your Telegram.`);
+    }
+  } catch { /* Not configured yet, or stale initData: plain web behaviour. */ }
+}
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
   $('#live').textContent = msg;
@@ -135,6 +167,10 @@ function linkBoxHTML(idPrefix) {
     <div class="field"><label for="${idPrefix}-url">Video link</label>
       <input type="url" id="${idPrefix}-url" placeholder="https://… (a video you own or have rights to clip)" autocomplete="off"></div>
     <div class="field"><div class="dropzone" id="${idPrefix}-drop">Or drop a video file here — or <button type="button" class="btn ghost sm" id="${idPrefix}-pick">choose a file</button><input type="file" id="${idPrefix}-file" accept="video/*" hidden></div></div>
+    <div class="field"><label>From Telegram</label>
+      <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button type="button" class="btn ghost sm" id="${idPrefix}-tg">Import a video you sent to the bot</button><span class="note" id="${idPrefix}-tg-note">Finished clips are auto-saved to Telegram after Render + QA.</span></div>
+      <div id="${idPrefix}-tg-list"></div>
+      <p class="note">Send a video to the Wayne.clips bot in Telegram, then import it here — it downloads from Telegram, not YouTube. Bots can only download 20 MB, so keep it short.</p></div>
     <div class="field"><label class="check"><input type="checkbox" id="${idPrefix}-rights"> <span>I own this video or have the rights to clip and repost it <b style="color:var(--text)">(required for any URL)</b></span></label>
       <select id="${idPrefix}-basis" style="margin-top:8px"><option value="owned">Rights basis: owned</option><option value="permitted">permitted — written permission on file</option><option value="licensed">licensed — e.g. Creative Commons (attribution added)</option></select></div>
     <div class="field"><label>Formats</label><div class="chips" data-group="formats">
@@ -155,6 +191,7 @@ function linkBoxHTML(idPrefix) {
 }
 function wireLinkBox(prefix) {
   const form = $(`#${prefix}-form`);
+  const tgChatId = () => (localStorage.getItem('wc-telegram-chat-id') || '').trim();
   const pick = (group) => $$(`.chips[data-group="${group}"] .chip`, form).filter(c => c.classList.contains('on')).map(c => c.dataset.v);
   const single = (group) => pick(group)[0];
   $$('.chips .chip', form).forEach(chip => chip.addEventListener('click', () => {
@@ -190,18 +227,56 @@ function wireLinkBox(prefix) {
         fd.append('niche', $(`#${prefix}-niche`).value.trim());
         fd.append('uploadMode', single('mode'));
         fd.append('captionStyle', single('style'));
+        fd.append('telegramChatId', tgChatId());
         job = await api.post('/api/jobs', fd, true);
       } else {
         job = await api.post('/api/jobs', {
           sourceUrl: url, rightsConfirmed: rights, rightsBasis: $(`#${prefix}-basis`).value,
           formats: pick('formats'), resolutions: [single('res')],
           niche: $(`#${prefix}-niche`).value.trim(), uploadMode: single('mode'), captionStyle: single('style'),
+          telegramChatId: tgChatId(),
         });
       }
       toast('Job created — the seven agents are running.');
+      tgHaptic('light');
       location.hash = `#/jobs/${job.id}`;
     } catch (e2) { err.textContent = e2.message; btn.disabled = false; btn.textContent = 'CREATE CLIPS'; }
   });
+  const tgBtn = $(`#${prefix}-tg`), tgList = $(`#${prefix}-tg-list`), tgNote = $(`#${prefix}-tg-note`);
+  if (tgBtn) tgBtn.addEventListener('click', async () => {
+    tgBtn.disabled = true; tgBtn.textContent = 'CHECKING TELEGRAM…';
+    try {
+      const data = await api.get('/api/telegram/updates');
+      if (!data.configured) { tgList.innerHTML = `<p class="note">Telegram isn't connected yet — set it up in <a href="#/settings">Settings</a>.</p>`; return; }
+      if (!data.videos.length) { tgList.innerHTML = `<p class="note">No videos found. Send a video to the bot in Telegram first, then tap this again.</p>`; return; }
+      tgList.innerHTML = data.videos.slice(0, 5).map(v => `<div class="row" style="display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap"><span class="mono">${esc(v.fileName)}</span><span class="note">${v.fileSize ? (v.fileSize / 1048576).toFixed(1) + ' MB' : ''} · ${new Date(v.date * 1000).toLocaleDateString()}</span><button type="button" class="btn ghost sm" data-tg-file="${esc(v.fileId)}">Import</button></div>`).join('');
+      $$('[data-tg-file]', tgList).forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true; b.textContent = 'IMPORTING…';
+        try {
+          const job = await api.post('/api/telegram/import', { fileId: b.dataset.tgFile, rightsConfirmed: $(`#${prefix}-rights`).checked, rightsBasis: $(`#${prefix}-basis`).value, formats: pick('formats'), resolutions: [single('res')], niche: $(`#${prefix}-niche`).value.trim(), uploadMode: single('mode'), captionStyle: single('style'), telegramChatId: tgChatId() });
+          toast('Job created from Telegram — the seven agents are running.');
+          tgHaptic('light');
+          location.hash = `#/jobs/${job.id}`;
+        } catch (e2) { b.disabled = false; b.textContent = 'Import'; tgNote.textContent = e2.message; }
+      }));
+    } catch (e) { tgList.innerHTML = `<p class="note">${esc(e.message)}</p>`; }
+    finally { tgBtn.disabled = false; tgBtn.textContent = 'Import a video you sent to the bot'; }
+  });
+  // Telegram MainButton: the native CREATE CLIPS button, only on the New
+  // Job view (the landing keeps scrolling). Previous handler is removed
+  // first so re-wiring the form never stacks handlers.
+  if (prefix === 'new') {
+    const tg = tgApp();
+    if (tg) {
+      try {
+        if (window.__wcMainBtn) tg.MainButton.offClick(window.__wcMainBtn);
+        window.__wcMainBtn = () => form.requestSubmit();
+        tg.MainButton.setText('CREATE CLIPS');
+        tg.MainButton.onClick(window.__wcMainBtn);
+        tg.MainButton.show();
+      } catch {}
+    }
+  }
 }
 
 // ---------- router ----------
@@ -230,6 +305,16 @@ function showApp(html) {
   scrollTo(0, 0);
 }
 function route() {
+  // Telegram chrome follows the view: MainButton only lives on New Job,
+  // BackButton everywhere except the landing.
+  try {
+    const tg = tgApp();
+    if (tg) {
+      tg.MainButton.hide();
+      const hash = location.hash.replace(/^#/, '') || '/';
+      if (hash === '/') tg.BackButton.hide(); else tg.BackButton.show();
+    }
+  } catch {}
   const hash = location.hash.replace(/^#/, '') || '/';
   const [path, arg] = hash.split('/').filter(Boolean);
   const key = '/' + (path || '');
@@ -690,7 +775,14 @@ async function viewSettings() {
   <tr><td>OPENAI_MODEL</td><td>GPT-6 model id — default gpt-6.2-sol, frontier gpt-6.2-astra</td><td class="mono">—</td></tr>
   <tr><td>YOUTUBE_API_KEY</td><td>Scout live metadata</td><td class="mono">—</td></tr>
   <tr><td>YOUTUBE_ACCESS_TOKEN</td><td>Real YouTube uploads (private by default)</td><td class="mono">—</td></tr>
+  <tr><td>TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID</td><td>Telegram backup: finished clips auto-saved to Telegram; import videos from the bot</td><td class="mono">—</td></tr>
+  <tr><td>TELEGRAM_BOT_USERNAME</td><td>Bot link shown in Settings (e.g. wayneclips_bot)</td><td class="mono">—</td></tr>
   <tr><td>REDIS_URL / QUEUE=bullmq</td><td>BullMQ queue instead of in-process</td><td class="mono">—</td></tr></table></div>
+  <div class="panel glass"><h2>Telegram backup &amp; import</h2>
+  <p class="lede">Finished clips are auto-saved to your Telegram after Render + QA, and you can import videos you sent to the bot — no YouTube download needed. <span id="set-tg-status">Checking…</span></p>
+  <div class="field"><label>Bot link</label><div id="set-tg-link"></div></div>
+  <div class="field"><label>Your Telegram chat / channel id</label><input type="text" id="set-tg-chat" placeholder="-1001234567890 (channel) or your user id (DM)"><p class="note">Tap Connect after messaging the bot — or paste the id. Saved in this browser only, so it survives a server wipe. Channel: add the bot as admin first. Bots can send 50 MB and download 20 MB — the 2 GB figure is for the Telegram app, not bots.</p></div>
+  <div class="row" style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" id="set-tg-connect" type="button">Connect — find my chat id</button><button class="btn primary" id="set-tg-save" type="button">Save Telegram chat id</button></div><div id="set-tg-channels" class="note"></div></div>
   <div class="panel glass"><h2>Owned channels &amp; permissions</h2>
   <div class="field"><label>Owned channel IDs (comma-separated)</label><input type="text" id="set-owned" placeholder="e.g. UCxxxx, UCyyyy"></div>
   <div class="field"><label>Permissions file (JSON: [{channelId, evidence, attribution, expires}])</label><textarea id="set-perm" rows="4" placeholder='[{"channelId":"UC…","evidence":"email 12 Jan","attribution":"Footage: @x","expires":"2027-01-01"}]'></textarea></div>
@@ -714,6 +806,48 @@ async function viewSettings() {
       await api.post('/api/settings', { settings: { ownedChannelIds: $('#set-owned').value.split(',').map(s => s.trim()).filter(Boolean), permissionsText: $('#set-perm').value } });
       toast('Settings saved.');
     } catch (e) { toast(e.message); }
+  });
+  const tgChatInput = $('#set-tg-chat');
+  const savedTg = (localStorage.getItem('wc-telegram-chat-id') || '').trim();
+  try {
+    const tg = await api.get('/api/telegram/updates');
+    $('#set-tg-status').textContent = tg.configured ? 'connected — bot is live.' : 'not connected — set TELEGRAM_BOT_TOKEN in Render env first.';
+    $('#set-tg-link').innerHTML = tg.botUsername ? `<a class="btn ghost sm" href="https://t.me/${esc(tg.botUsername)}" target="_blank" rel="noopener">Open @${esc(tg.botUsername)} in Telegram</a><p class="note">Tap START in the bot, then tap Connect below.</p>` : `<p class="note">Set TELEGRAM_BOT_USERNAME in Render env to show the bot link here.</p>`;
+    if (savedTg) tgChatInput.value = savedTg;
+    else if (tg.defaultChatId) tgChatInput.value = tg.defaultChatId;
+    const chans = tg.channels || [];
+    if (chans.length) {
+      if (!tgChatInput.value) tgChatInput.value = chans[0].chatId;
+      $('#set-tg-channels').innerHTML = `Channels the bot is in (tap to use as the clips destination): ${chans.map(c => `<button class="btn ghost sm" type="button" data-chat="${esc(c.chatId)}">${esc(c.title || c.chatId)} (${esc(c.chatId)})</button>`).join(' ')}`;
+      $('#set-tg-channels').querySelectorAll('[data-chat]').forEach(b => b.addEventListener('click', () => {
+        tgChatInput.value = b.dataset.chat;
+        localStorage.setItem('wc-telegram-chat-id', b.dataset.chat);
+        toast(`Clips will go to ${b.textContent.trim()}.`);
+      }));
+    }
+  } catch (e) { $('#set-tg-status').textContent = `Could not check Telegram: ${e.message}`; if (savedTg) tgChatInput.value = savedTg; }
+  $('#set-tg-connect').addEventListener('click', async () => {
+    try {
+      const tg = await api.get('/api/telegram/updates');
+      const ch = (tg.channels || [])[0];
+      if (ch) {
+        tgChatInput.value = ch.chatId;
+        localStorage.setItem('wc-telegram-chat-id', ch.chatId);
+        toast(`Connected to channel ${ch.title || ch.chatId} — clips will go there.`);
+        return;
+      }
+      const s = (tg.starters || [])[0];
+      if (!s) { toast('No /start found — open the bot in Telegram and tap START first.'); return; }
+      tgChatInput.value = s.chatId;
+      localStorage.setItem('wc-telegram-chat-id', s.chatId);
+      toast(`Connected as ${s.username ? '@' + s.username : s.firstName || 'you'} — clips will go to chat ${s.chatId}.`);
+    } catch (e) { toast(e.message); }
+  });
+  $('#set-tg-save').addEventListener('click', () => {
+    const v = tgChatInput.value.trim();
+    if (!v) { toast('Paste a chat id first — or tap Connect.'); return; }
+    localStorage.setItem('wc-telegram-chat-id', v);
+    toast('Telegram chat id saved in this browser.');
   });
 }
 
@@ -766,6 +900,7 @@ function toggleSound() {
 
 // ---------- init ----------
 function init() {
+  initTelegram();
   buildRail();
   $('#linkbox-slot').innerHTML = linkBoxHTML('final');
   wireLinkBox('final');

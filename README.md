@@ -42,10 +42,10 @@ wayne-clips/
 
 ## How it works
 
-Seven agents share one `job.json` (persisted after every agent). Order: Scout → Ingest → Viral Moments → Subtitles → Effects → Render + QA → Publish. Each agent writes only its own key. Per-agent retry (2 retries, then fallback, otherwise `failed`). Live log over SSE (`/api/events?jobId=…`), polling fallback on the client.
+Seven agents share one `job.json` (persisted after every agent). Order: Scout → Ingest → Viral Moments → Subtitles → Effects → Render + QA → Publish. Each agent writes only its own key. Per-agent retry (2 retries, then fallback, otherwise `failed`); deterministic errors fail fast after 1 attempt. Live log over SSE (`/api/events?jobId=…`), polling fallback on the client.
 
-- **Ingest** — yt-dlp download (rights-confirmed URLs only), ffprobe probe, 16 kHz audio extract, faster-whisper (tiny) transcript with word timestamps. No speech → transcript empty → the job says "voiceover needed" and fails honestly at Viral Moments.
-- **Viral Moments** — scores every transcript sentence (Claude when a key is set, else heuristic), picks clips of 15–60 s on sentence boundaries. Spoiler/leak-flagged moments are dropped before storage — zero tolerated.
+- **Ingest** — yt-dlp download (rights-confirmed URLs only), ffprobe probe, 16 kHz audio extract, faster-whisper (tiny) transcript with word timestamps. Logs "transcribing…" on start and heartbeats every 15s while Whisper runs, so a long transcription never looks frozen. No speech → transcript empty → Viral Moments cuts on visual moments instead.
+- **Viral Moments** — scores every transcript sentence (Claude when a key is set, else heuristic), picks clips of 15–60 s on sentence boundaries. Spoiler/leak-flagged moments are dropped before storage — zero tolerated. **Visual fallback:** when there is no speech, ffmpeg scene-change detection cuts 15–60 s windows on visual change (fixed 30 s windows when the picture never changes), scored by scene-change density, captioned with the hook line. A silent or music-only video completes instead of failing; only videos under 8 s with no speech still fail (deterministically, no retries).
 - **Subtitles** — word-level ASS captions (pop / bounce / karaoke), safe-area aware, burned with libass.
 - **Effects** — only presets ffmpeg can actually draw (grades, fades, slow push, vignette). Planned-only presets (glitch, speed-ramp, face-track, SFX, whip transitions) are marked `planned` and never selected. ≤ 0.5 effects/sec.
 - **Render + QA** — 9:16 reframe (blur-pad default, center, keyframed crop-X), libx264/aac, then real QA with ffprobe (dimensions, duration, audio present/sync, black frames) + subtitle safe-area check. Auto-fix loop (caption font ×0.85, then safe mode). Contact-sheet JPEG per clip. Exports above the source resolution are flagged **upscaled ×N**.
@@ -55,13 +55,31 @@ Seven agents share one `job.json` (persisted after every agent). Order: Scout �
 
 **Earnings.** Formula only, no default rates, no "average income": `payout = verifiedViews / 1000 × rate × (1 − fee)`, `viewsNeeded = target / (rate × (1 − fee)) × 1000`. Example (helper text only): 10,000 target at 1.00/1K with a 10% fee needs 11,111,112 verified views.
 
+## Telegram backup (finished clips survive a wiped job disk)
+
+After Render + QA, each finished clip is pushed to Telegram cloud (`agents/telegram.mjs`, called at the end of Publish). Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in Render env — create the bot with @BotFather, add it to a channel as admin (or DM it once), and put the token + chat id in env, never in chat. The backup records `file_id` + `message_id` on `job.telegram`, so a clip can be re-sent even after its job record is gone.
+- **Clips destination (22 Nov): the private channel "Wayne.clips Cloud"** — @WayneClipsBot is admin with Post Messages. `TELEGRAM_CHAT_ID` must be the channel's numeric id (get it by forwarding a channel message to @userinfobot, or from the bot's `getUpdates` after it posts); the invite link alone is not the id. Mini App users still get their own clips too: their user id becomes the job's `telegramChatId`, which beats the env default for that job.
+
+- **File-backup only (v1).** If a job record is wiped, the Studio cannot re-attach the clip — that needs a persistent index, which is the paid-disk / external-DB fix. The clip file itself is safe in Telegram.
+- **Bot limit is 50 MB per file** (the 2 GB figure is for the Telegram app / user clients, not bots). A 1080p Short ≤60 s is ~10–30 MB, so Shorts fit; bigger files are skipped, never fatal. Bigger files later, free: **file_id resend** — a file already on Telegram (uploaded from the app, up to 4 GB for Premium users) can be re-sent by the bot by its `file_id` at any size without uploading; a self-hosted Bot API server (2 GB sends) needs paid hosting and is not planned.
+- **A backup failure never fails the job.** It is logged, the clip stays on disk, and Publish still completes. With no token/chat configured the step skips silently.
+
+## Telegram Mini App (the site, inside Telegram)
+
+The bot's menu button opens the same site inside Telegram (`@WayneClipsBot` → "Wayne.clips"). The site loads `telegram-web-app.js`; outside Telegram `window.Telegram` is undefined and nothing changes.
+
+- **Identity from initData.** On open, the frontend sends `Telegram.WebApp.initData` to `POST /api/telegram/session`; the server validates Telegram's HMAC (tampered or >24h-old data → 401) and returns the Telegram user id + a 24h session token. The token is sent as `Bearer` auth on API calls (accepted alongside `API_TOKEN`), and the user id becomes the job's `telegramChatId` — so finished clips auto-save to that user with no manual chat-id setup. The bot token never leaves the server.
+- **Native controls, only where they fit.** `MainButton` ("CREATE CLIPS") on the New Job view, `BackButton` on every view except the landing, a light haptic when a job is created, header/background colour matched to the app. No CloudStorage (identity comes from initData), no `sendData`, no swipe disabling (the landing scrolls).
+- **Import from the bot** (`GET /api/telegram/updates`, `POST /api/telegram/import`): videos sent to the bot become jobs straight from Telegram's servers — no YouTube download. Bot downloads cap at 20 MB.
+- **Limits that still apply:** the Mini App runs on the same Render free instance, so it does not fix crash-wipes (see persistence below); the 50 MB send / 20 MB download bot caps stand.
+
 ## Status — what is verified and what is not
 
 Verified in this sandbox (22 Nov 2026, see `npm test` output and `scripts/e2e.mjs`):
 
 - `npm test` — **35/35 pass, 0 fail** (22 Nov 2026, serial run, ~208 s): guard, viral, subtitle, effects, render, ingest, scout, publish, orchestrator, api, claude — no network needed.
 - ffmpeg 8.1.2 + ffprobe render real 1080×1920 and 2160×3840 MP4s with audio from a generated 120 s test video (flite narration); ffprobe dimensions/duration/audio confirmed; 4K from a 720p source correctly flagged upscaled ×2.7 / ×5.3.
-- faster-whisper `tiny` transcribes the generated narration (291 words, 0–95.8 s) in ~7 s; a tone-only video yields an empty transcript and the job fails honestly with "voiceover needed".
+- faster-whisper `tiny` transcribes the generated narration (291 words, 0–95.8 s) in ~7 s; a tone-only video yields an empty transcript and the job now completes via the visual fallback (scene-change cuts, hook caption).
 - End-to-end over real HTTP (`scripts/e2e.mjs`, clean re-run job `4edf73f8-d9f1-4338-9698-30f4e11d459e`, **30/30 checks passed**): file-upload job runs all seven agents to `done`, 3 clips + 9 drafts; ffprobe on the earlier E2E job's rendered files (`2f67ba9d-d21c-4501-bb92-949da01f06d0`) — clip #1 1080×1920 h264+aac 26.9 s, clip #2 1080×1920 29.0 s, clip #3 1080×1920 24.7 s; posters + contact sheets on disk; Range serving returns 206; path traversal blocked (400); take-over regenerate applies overrides (caption "E2E TAKEOVER"); approve works once (200) and the ledger blocks the second approval (409).
 - Rights gate: URL job without `rightsConfirmed` is rejected with 400.
 - Earnings formula reproduces the spec example exactly (11,111,112 views).

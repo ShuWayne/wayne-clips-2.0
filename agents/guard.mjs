@@ -29,6 +29,7 @@ export function validateJobInput(input) {
   }
   if (input.formats && !input.formats.every(f => ['9:16', '1:1', '16:9'].includes(f))) errors.push('formats must be 9:16, 1:1 or 16:9');
   if (input.resolutions && !input.resolutions.every(r => ['1080p', '4K', '8K'].includes(r))) errors.push('resolutions must be 1080p, 4K or 8K');
+  if (input.telegramChatId && !/^(-?[0-9]+|@[A-Za-z0-9_]{5,})$/.test(String(input.telegramChatId).trim())) errors.push('telegramChatId must be a Telegram chat id (e.g. -1001234567890) or @channel username');
   return errors;
 }
 

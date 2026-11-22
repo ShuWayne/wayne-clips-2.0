@@ -30,7 +30,7 @@ test('ingest probes a local file and transcribes real speech with faster-whisper
   assert.equal(out.transcript.engine, 'faster-whisper');
 });
 
-test('ingest on a tone-only video reports an empty transcript — voiceover needed', async (t) => {
+test('ingest on a tone-only video reports an empty transcript (visual fallback cuts it later)', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'wc-ingest-tone-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await copyFile(TONE, join(dir, 'source.mp4'));

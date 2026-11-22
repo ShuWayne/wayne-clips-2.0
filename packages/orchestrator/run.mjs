@@ -37,6 +37,12 @@ export async function run(job, { from = 'scout', to = 'publish', emit, ctx = {} 
         lastErr = err;
         logEvent(job, id, 'failed', `${id}: attempt ${attempt} failed — ${err.message.slice(0, 200)}`, emit);
         await saveJob(job);
+        // Deterministic errors cannot be fixed by retrying — fail fast
+        // instead of burning 2 more attempts on the same error.
+        if (err.deterministic) {
+          logEvent(job, id, 'failed', `${id}: not retrying — this error cannot be fixed by retrying.`, emit);
+          break;
+        }
         if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
       }
     }

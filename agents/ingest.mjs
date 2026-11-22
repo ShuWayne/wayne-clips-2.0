@@ -1,8 +1,8 @@
 // Ingest — yt-dlp download (rights-confirmed only), audio extract,
 // resolution probe, faster-whisper transcript with word timestamps.
 // Retry 2x, then fail with a clear message. No speech in the source =>
-// transcript is empty and the job must say "voiceover needed" — a fixture
-// transcript is NEVER used for a real job.
+// transcript is empty and Viral Moments cuts on visual moments instead —
+// a fixture transcript is NEVER used for a real job.
 import { copyFile } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { ffprobe, extractWav, run } from '../packages/shared/media.mjs';
@@ -48,11 +48,18 @@ async function ingestOnce(job, ctx) {
   const probe = await ffprobe(sourcePath);
   logEvent(job, 'ingest', 'running', `Ingest: source probed — ${probe.width}x${probe.height}, ${probe.duration.toFixed(1)}s, audio ${probe.hasAudio ? 'present' : 'MISSING'}.`, emit);
 
-  // Transcript
+  // Transcript — Whisper can take 90s+ on the free tier for long videos, and
+  // the job looked frozen (no progress, stale updatedAt) while it ran. Log
+  // the start and heartbeat every 15s so the Studio never reads "stuck".
   const wav = join(dir, 'audio.wav');
   let transcript = { segments: [], words: [], language: null, empty: true, engine: 'faster-whisper' };
   if (probe.hasAudio) {
     await extractWav(sourcePath, wav);
+    logEvent(job, 'ingest', 'running', 'Ingest: audio extracted — transcribing with faster-whisper (tiny model). Longer videos take a while; progress updates every 15s.', emit);
+    const heartbeat = setInterval(() => {
+      logEvent(job, 'ingest', 'running', 'Ingest: still transcribing…', emit);
+      saveJob(job).catch(() => {});
+    }, 15000);
     try {
       const { stdout } = await run('python3', [WHISPER_SCRIPT, wav, '--model', process.env.WHISPER_MODEL || 'tiny'], { timeoutMs: 600000 });
       const parsed = JSON.parse(stdout);
@@ -61,10 +68,12 @@ async function ingestOnce(job, ctx) {
     } catch (err) {
       logEvent(job, 'ingest', 'running', `Ingest: Whisper failed (${err.message.slice(0, 120)}) — transcript unavailable, continuing with no transcript.`, emit);
       transcript = { segments: [], words: [], language: null, empty: true, engine: 'faster-whisper (failed)' };
+    } finally {
+      clearInterval(heartbeat);
     }
   }
   if (transcript.empty) {
-    logEvent(job, 'ingest', 'done', 'Ingest: transcript empty — no speech detected. Voiceover needed before clips can be cut on sentence boundaries.', emit);
+    logEvent(job, 'ingest', 'done', 'Ingest: transcript empty — no speech detected. Clips will be cut on visual moments instead.', emit);
   } else {
     logEvent(job, 'ingest', 'done', `Ingest: transcript ready — ${(transcript.words || []).length} words, ${(transcript.segments || []).length} sentences.`, emit);
   }

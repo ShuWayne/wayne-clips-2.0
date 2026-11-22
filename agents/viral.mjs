@@ -4,8 +4,14 @@
 // spoiler, leak or embargo flag are DROPPED before they reach storage —
 // zero tolerated. Claude scores when a key is set, else the heuristic
 // scorer (and the log says so).
+// NO SPEECH? No failure: when the transcript is empty the agent falls back
+// to VISUAL moments — ffmpeg scene-change detection cuts the video into
+// 15–60s windows on visual change (fixed 30s windows when the picture never
+// changes), scored by scene-change density, captioned with the hook line.
+// A silent kitten video becomes clips instead of a dead job.
 import { flagText, scoreSentence } from './guard.mjs';
 import { askJson, NotConfigured, llmProvider } from '../packages/shared/llm.mjs';
+import { run } from '../packages/shared/media.mjs';
 import { logEvent, setAgent, saveJob } from '../packages/shared/job.mjs';
 
 export const MOMENT_SCHEMA = {
@@ -56,6 +62,72 @@ export function sentencesFromTranscript(transcript) {
   })).filter(s => s.text.length > 0);
 }
 
+// Scene-change timestamps (seconds) for a source file, via ffmpeg's
+// select+showinfo filters. Best-effort: any failure returns [] and the
+// caller falls back to fixed windows — a missed cut must never fail a job.
+export async function detectScenes(sourcePath, { threshold = 0.3, runImpl = run } = {}) {
+  try {
+    const { stderr } = await runImpl('ffmpeg', [
+      '-i', sourcePath,
+      '-vf', `select='gt(scene,${threshold})',showinfo`,
+      '-an', '-f', 'null', '-',
+    ], { timeoutMs: 600000 });
+    return [...(stderr || '').matchAll(/pts_time:([\d.]+)/g)]
+      .map(m => parseFloat(m[1]))
+      .filter(t => Number.isFinite(t) && t > 0)
+      .sort((a, b) => a - b);
+  } catch {
+    return [];
+  }
+}
+
+// Pure function — unit-tested without any I/O. Cut a speechless video into
+// 15–60s windows on visual change. Windows close at the first scene cut
+// after 15s (or at +30s when the picture stays still); a tail under 8s is
+// dropped. Score = scene-change density + a sweet-spot bonus for 15–30s;
+// static video gets flat 0.35 windows. Hook comes from the niche.
+export function pickVisualMoments(sceneTimes, duration, { maxClips = 6, niche = '' } = {}) {
+  if (!Number.isFinite(duration) || duration < 8) return { moments: [], dropped: 0, reason: 'too-short' };
+  const cuts = (sceneTimes || []).filter(t => t > 0 && t < duration).sort((a, b) => a - b);
+  const hookBase = (niche || '').trim().toUpperCase().slice(0, 60) || 'WATCH THIS';
+  const flags = flagText(hookBase);
+  const windows = [];
+  let start = 0;
+  while (start < duration) {
+    const nextCut = cuts.find(c => c > start + 15);
+    let end;
+    if (nextCut !== undefined && nextCut - start <= 60) end = nextCut;
+    else end = Math.min(duration, start + 30);
+    if (end - start < 8) break;
+    if (end - start > 60) end = start + 60;
+    const inWindow = cuts.filter(c => c > start && c <= end).length;
+    const sweet = end - start >= 15 && end - start <= 30;
+    const score = inWindow > 0
+      ? Math.min(1, 0.25 + 0.15 * Math.min(inWindow, 4) + (sweet ? 0.1 : 0))
+      : 0.35;
+    windows.push({
+      start: +start.toFixed(2), end: +end.toFixed(2),
+      hook: hookBase,
+      reason: inWindow > 0
+        ? `Visual moment — ${inWindow} scene change(s) in this window, no speech in the source.`
+        : 'Visual moment — picture holds still here, cut on a fixed window, no speech in the source.',
+      score: +score.toFixed(2), spoilerRisk: flags.spoilerRisk, leakRisk: flags.leakRisk,
+    });
+    start = end;
+  }
+  const dropped = windows.filter(w => w.spoilerRisk || w.leakRisk).length;
+  const moments = windows
+    .filter(w => !w.spoilerRisk && !w.leakRisk)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxClips)
+    .map(({ spoilerRisk, leakRisk, ...m }) => ({ ...m, spoilerRisk: false, leakRisk: false }));
+  return { moments, dropped, reason: moments.length ? null : 'no-clean-moments' };
+}
+
+function deterministicError(msg) {
+  return Object.assign(new Error(msg), { deterministic: true });
+}
+
 // Pure function — unit-tested without any I/O.
 export function pickMoments(sentences, duration, { maxClips = 8 } = {}) {
   const scored = sentences.map((s, i) => {
@@ -97,16 +169,30 @@ export function pickMoments(sentences, duration, { maxClips = 8 } = {}) {
   return { moments, dropped: dropped.length };
 }
 
-export async function runViral(job, ctx) {
+export async function runViral(job, ctx, { detectScenesImpl = detectScenes } = {}) {
   const { emit } = ctx;
   const ingest = job.agents.ingest.output;
   if (!ingest) throw new Error('Viral Moments ran before Ingest finished');
   if (ingest.transcriptEmpty) {
-    const msg = 'Viral Moments: transcript empty — no speech detected. Voiceover needed before clips can be cut.';
-    logEvent(job, 'viral', 'failed', msg, emit);
-    setAgent(job, 'viral', 'failed', null, msg, emit);
+    // No speech — cut on visual change instead of failing the job.
+    const duration = ingest.probe.duration;
+    const scenes = await detectScenesImpl(ingest.sourcePath);
+    const visual = pickVisualMoments(scenes, duration, { maxClips: parseInt(process.env.MAX_CLIPS_PER_JOB || '6', 10), niche: job.input.niche });
+    if (!visual.moments.length) {
+      const msg = visual.reason === 'too-short'
+        ? `Viral Moments: video is only ${duration.toFixed(1)}s and has no speech — too short to cut a clip.`
+        : 'Viral Moments: no clean visual moments survived the spoiler/leak guard.';
+      logEvent(job, 'viral', 'failed', msg, emit);
+      setAgent(job, 'viral', 'failed', null, msg, emit);
+      await saveJob(job);
+      throw deterministicError(msg);
+    }
+    const output = { moments: visual.moments, droppedFlagged: visual.dropped, engine: 'visual' };
+    logEvent(job, 'viral', 'done', `Viral Moments: ${visual.moments.length} clips picked (visual fallback — no speech, cut on scene changes)${visual.dropped ? `, ${visual.dropped} spoiler/leak-flagged moment(s) dropped` : ''}.`, emit);
+    job.agents.viral.output = output;
+    setAgent(job, 'viral', 'done', output, null, emit);
     await saveJob(job);
-    throw new Error(msg);
+    return output;
   }
   const sentences = sentencesFromTranscript(ingest.transcript);
   const duration = ingest.probe.duration;
@@ -138,7 +224,7 @@ export async function runViral(job, ctx) {
     logEvent(job, 'viral', 'failed', msg, emit);
     setAgent(job, 'viral', 'failed', null, msg, emit);
     await saveJob(job);
-    throw new Error(msg);
+    throw deterministicError(msg);
   }
   const output = { moments: picked.moments, droppedFlagged: picked.dropped, engine };
   logEvent(job, 'viral', 'done', `Viral Moments: ${picked.moments.length} clips picked (${engine} scorer)${picked.dropped ? `, ${picked.dropped} spoiler/leak-flagged moment(s) dropped` : ''}.`, emit);
