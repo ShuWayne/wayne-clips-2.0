@@ -26,7 +26,7 @@ function check(name, ok, extra = '') {
 }
 
 const proc = spawn('node', ['apps/api/server.mjs'], {
-  cwd: ROOT, env: { ...process.env, PORT: String(PORT), MAX_CLIPS_PER_JOB: '3' }, stdio: 'pipe',
+  cwd: ROOT, env: { ...process.env, PORT: String(PORT), MAX_CLIPS_PER_JOB: process.env.MAX_CLIPS_PER_JOB || '3' }, stdio: 'pipe',
 });
 proc.stdout.on('data', d => process.stdout.write(`[server] ${d}`));
 proc.stderr.on('data', d => process.stderr.write(`[server:err] ${d}`));
@@ -64,14 +64,27 @@ try {
   fd.append('resolutions', JSON.stringify(['1080p']));
   fd.append('niche', 'e2e test');
   fd.append('uploadMode', 'review');
-  fd.append('captionStyle', 'pop');
+  // E2E_DESK=1: run the job with every editing-desk stage ON (needs
+  // EDITING_DESK set in the environment). Trim 10–40s exercises the
+  // lossless pre-trim; wordpop exercises the remotion caption style.
+  const deskOn = process.env.E2E_DESK === '1';
+  fd.append('captionStyle', deskOn ? 'wordpop' : 'pop');
+  if (deskOn) {
+    fd.append('desk', JSON.stringify({
+      losslessTrim: true, trimStart: 10, trimEnd: 40,
+      silenceCut: true, denoise: true, demucsVocals: true,
+      rembgPoster: true, upscalePoster: true, titleCard: true,
+    }));
+  }
   const created = await (await fetch(`${BASE}/api/jobs`, { method: 'POST', body: fd })).json();
   check('file-upload job created', !!created.id, created.id || JSON.stringify(created).slice(0, 200));
   const jobId = created.id;
 
-  // Poll until done/failed (renders take a while; 10 min cap).
+  // Poll until done/failed (renders take a while; 10 min cap by default,
+  // E2E_POLL_ITERS extends it for desk runs with the slow stages on).
   let job = null;
-  for (let i = 0; i < 120; i++) {
+  const pollIters = parseInt(process.env.E2E_POLL_ITERS || '120', 10);
+  for (let i = 0; i < pollIters; i++) {
     await new Promise(r => setTimeout(r, 5000));
     job = (await (await fetch(`${BASE}/api/jobs/${jobId}`)).json()).job;
     const states = Object.values(job.agents).map(a => a.status).join(',');

@@ -9,6 +9,7 @@ import { ffprobe, extractWav, run } from '../packages/shared/media.mjs';
 import { logEvent, setAgent, saveJob } from '../packages/shared/job.mjs';
 import { r2Config, mirrorJobFile } from '../packages/shared/store.mjs';
 import { sendSourceToTelegram, postJobSnapshot } from './telegram.mjs';
+import { deskAvailable, silenceCut, denoiseWav, losslessTrim } from './editing-desk.mjs';
 
 const WHISPER_SCRIPT = new URL('../scripts/whisper.py', import.meta.url).pathname;
 
@@ -47,8 +48,47 @@ async function ingestOnce(job, ctx) {
       '-o', sourcePath, job.input.sourceUrl,
     ], { timeoutMs: 600000 });
   }
-  const probe = await ffprobe(sourcePath);
+  let probe = await ffprobe(sourcePath);
   logEvent(job, 'ingest', 'running', `Ingest: source probed — ${probe.width}x${probe.height}, ${probe.duration.toFixed(1)}s, audio ${probe.hasAudio ? 'present' : 'MISSING'}.`, emit);
+
+  // Editing-desk stages (all optional, default OFF, env-gated — see
+  // agents/editing-desk.mjs). Each stage either produces a new working
+  // source or fails soft and the original is kept. Downstream agents only
+  // ever see the final working source, so transcript timings stay valid.
+  const desk = job.input.desk || {};
+  let workingFile = job.input.sourceFile || 'source.mp4';
+  const deskUsed = {};
+  if (desk.losslessTrim && Number.isFinite(desk.trimStart) && Number.isFinite(desk.trimEnd)) {
+    try {
+      const trimmed = join(dir, 'source-trimmed.mp4');
+      const r = await losslessTrim(sourcePath, trimmed, desk.trimStart, desk.trimEnd);
+      sourcePath = trimmed; workingFile = 'source-trimmed.mp4';
+      probe = await ffprobe(sourcePath);
+      deskUsed.losslessTrim = { start: desk.trimStart, end: desk.trimEnd, outDuration: +r.outDuration.toFixed(2) };
+      logEvent(job, 'ingest', 'running', `Ingest: lossless pre-trim ${desk.trimStart}s–${desk.trimEnd}s (ffmpeg -c copy, LosslessCut concept) — working source is now ${r.outDuration.toFixed(1)}s.`, emit);
+    } catch (err) {
+      logEvent(job, 'ingest', 'running', `Ingest: lossless pre-trim skipped (${err.message.slice(0, 120)}) — using the full source.`, emit);
+    }
+  }
+  if (desk.silenceCut && probe.hasAudio) {
+    if (!deskAvailable()) {
+      logEvent(job, 'ingest', 'running', 'Ingest: silence cut is ON but EDITING_DESK is not set on this host — skipping, job continues as before.', emit);
+    } else {
+      try {
+        const cut = join(dir, 'source-cut.mp4');
+        const r = await silenceCut(sourcePath, cut);
+        sourcePath = cut; workingFile = 'source-cut.mp4';
+        probe = await ffprobe(sourcePath);
+        deskUsed.silenceCut = { inDuration: +r.inDuration.toFixed(2), outDuration: +r.outDuration.toFixed(2), removedSeconds: r.removedSeconds };
+        logEvent(job, 'ingest', 'running', `Ingest: silence cut removed ${r.removedSeconds}s of silence (auto-editor) — working source is now ${r.outDuration.toFixed(1)}s.`, emit);
+      } catch (err) {
+        logEvent(job, 'ingest', 'running', `Ingest: silence cut skipped (${err.message.slice(0, 120)}) — using the uncut source.`, emit);
+      }
+    }
+  }
+  // The working source is what every later agent cuts from, and what the
+  // Telegram/R2 mirrors save — keep the record in sync.
+  job.input.sourceFile = workingFile;
 
   // Transcript — Whisper can take 90s+ on the free tier for long videos, and
   // the job looked frozen (no progress, stale updatedAt) while it ran. Log
@@ -57,13 +97,28 @@ async function ingestOnce(job, ctx) {
   let transcript = { segments: [], words: [], language: null, empty: true, engine: 'faster-whisper' };
   if (probe.hasAudio) {
     await extractWav(sourcePath, wav);
+    let transcribeWav = wav;
+    if (desk.denoise) {
+      if (!deskAvailable()) {
+        logEvent(job, 'ingest', 'running', 'Ingest: denoise is ON but EDITING_DESK is not set on this host — transcribing the raw audio.', emit);
+      } else {
+        try {
+          const r = await denoiseWav(wav, join(dir, 'denoised'));
+          transcribeWav = r.out;
+          deskUsed.denoise = { out: 'denoised/audio.wav', duration: +r.duration.toFixed(2) };
+          logEvent(job, 'ingest', 'running', 'Ingest: audio denoised (DeepFilterNet) — transcribing the clean track.', emit);
+        } catch (err) {
+          logEvent(job, 'ingest', 'running', `Ingest: denoise skipped (${err.message.slice(0, 120)}) — transcribing the raw audio.`, emit);
+        }
+      }
+    }
     logEvent(job, 'ingest', 'running', 'Ingest: audio extracted — transcribing with faster-whisper (tiny model). Longer videos take a while; progress updates every 15s.', emit);
     const heartbeat = setInterval(() => {
       logEvent(job, 'ingest', 'running', 'Ingest: still transcribing…', emit);
       saveJob(job).catch(() => {});
     }, 15000);
     try {
-      const { stdout } = await run('python3', [WHISPER_SCRIPT, wav, '--model', process.env.WHISPER_MODEL || 'tiny'], { timeoutMs: 600000 });
+      const { stdout } = await run('python3', [WHISPER_SCRIPT, transcribeWav, '--model', process.env.WHISPER_MODEL || 'tiny'], { timeoutMs: 600000 });
       const parsed = JSON.parse(stdout);
       transcript = { ...parsed, engine: 'faster-whisper' };
       transcript.empty = (transcript.words || []).length === 0;
@@ -80,9 +135,10 @@ async function ingestOnce(job, ctx) {
     logEvent(job, 'ingest', 'done', `Ingest: transcript ready — ${(transcript.words || []).length} words, ${(transcript.segments || []).length} sentences.`, emit);
   }
   const output = {
-    sourcePath, sourceFile: job.input.sourceFile || 'source.mp4',
+    sourcePath, sourceFile: workingFile,
     probe, transcript,
     transcriptEmpty: transcript.empty,
+    desk: deskUsed,
   };
   job.agents.ingest.output = output;
   setAgent(job, 'ingest', 'done', output, null, emit);

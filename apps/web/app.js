@@ -159,6 +159,30 @@ async function loadLimitsFoot() {
   } catch { $('#limits-foot').textContent = 'Platform limits — last checked unknown'; }
 }
 
+// ---------- editing desk (optional stages, default OFF) ----------
+// Toggles persist in localStorage like the Telegram chat id. The server
+// also gates every stage on EDITING_DESK being set on the host, so these
+// do nothing on Render's free tier — jobs just run as before.
+const DESK_STAGES = [
+  ['losslessTrim', 'Lossless pre-trim (ffmpeg stream copy) — needs trim start/end below'],
+  ['silenceCut', 'Silence cut (auto-editor)'],
+  ['denoise', 'Denoise audio (DeepFilterNet)'],
+  ['demucsVocals', 'Vocal isolation (demucs) — slow, ~50s per 15s of audio'],
+  ['rembgPoster', 'Background-removed poster (rembg, u2net)'],
+  ['upscalePoster', 'Upscaled poster (Real-ESRGAN 2x)'],
+  ['titleCard', 'Portrait title card (hyperframes)'],
+];
+const deskChecked = (id) => localStorage.getItem(`wc-desk-${id}`) === '1';
+function deskOptionsFromForm(prefix) {
+  const d = {};
+  for (const [id] of DESK_STAGES) d[id] = $(`#${prefix}-desk-${id}`)?.checked || false;
+  const s = parseFloat($(`#${prefix}-trim-start`)?.value || '');
+  const e = parseFloat($(`#${prefix}-trim-end`)?.value || '');
+  d.trimStart = Number.isFinite(s) ? s : null;
+  d.trimEnd = Number.isFinite(e) ? e : null;
+  return d;
+}
+
 // ---------- link box ----------
 function linkBoxHTML(idPrefix) {
   return `<form class="linkbox glass" id="${idPrefix}-form">
@@ -179,7 +203,11 @@ function linkBoxHTML(idPrefix) {
       <button type="button" class="chip on" data-v="1080p">1080p</button><button type="button" class="chip" data-v="4K">4K</button><button type="button" class="chip" data-v="8K">8K</button></div>
       <p class="note">Exports above the source resolution are upscaled, not real 4K/8K detail.</p></div>
     <div class="field"><label>Caption style</label><div class="chips" data-group="style">
-      <button type="button" class="chip on" data-v="pop">pop</button><button type="button" class="chip" data-v="bounce">bounce</button><button type="button" class="chip" data-v="karaoke">karaoke</button></div></div>
+      <button type="button" class="chip on" data-v="pop">pop</button><button type="button" class="chip" data-v="bounce">bounce</button><button type="button" class="chip" data-v="karaoke">karaoke</button><button type="button" class="chip" data-v="wordpop">word-pop</button></div></div>
+    <div class="field"><label>Editing desk (optional — runs only where the desk is installed)</label>
+      <div id="${idPrefix}-desk">${DESK_STAGES.map(([id, label]) => `<label class="check" style="display:block;margin:4px 0"><input type="checkbox" id="${idPrefix}-desk-${id}" data-desk="${id}" ${deskChecked(id) ? 'checked' : ''}> <span>${label}</span></label>`).join('')}</div>
+      <div class="row" style="display:flex;gap:8px;margin-top:6px"><label style="flex:1">Trim start (s)<input type="number" id="${idPrefix}-trim-start" min="0" step="0.5" placeholder="e.g. 12"></label><label style="flex:1">Trim end (s)<input type="number" id="${idPrefix}-trim-end" min="0" step="0.5" placeholder="e.g. 90"></label></div>
+      <p class="note">Trim start/end only apply with the pre-trim toggle on. Chatterbox voiceover is disabled (weights need HuggingFace, banned) and DaVinci Resolve is excluded (desktop app) — see Settings.</p></div>
     <div class="field"><label for="${idPrefix}-niche">Niche (free text — used for hashtags)</label>
       <input type="text" id="${idPrefix}-niche" placeholder="e.g. study tips"></div>
     <div class="field"><label>Upload mode</label><div class="chips" data-group="mode">
@@ -200,6 +228,7 @@ function wireLinkBox(prefix) {
     else $$('.chips[data-group="' + group + '"] .chip', form).forEach(c => c.classList.toggle('on', c === chip));
   }));
   const drop = $(`#${prefix}-drop`), fileInput = $(`#${prefix}-file`);
+  $$('#' + prefix + '-desk input[data-desk]', form).forEach(cb => cb.addEventListener('change', () => localStorage.setItem(`wc-desk-${cb.dataset.desk}`, cb.checked ? '1' : '0')));
   $(`#${prefix}-pick`).addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', () => { if (fileInput.files[0]) drop.firstChild.textContent = `File: ${fileInput.files[0].name} — `; });
   drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
@@ -228,13 +257,14 @@ function wireLinkBox(prefix) {
         fd.append('uploadMode', single('mode'));
         fd.append('captionStyle', single('style'));
         fd.append('telegramChatId', tgChatId());
+        fd.append('desk', JSON.stringify(deskOptionsFromForm(prefix)));
         job = await api.post('/api/jobs', fd, true);
       } else {
         job = await api.post('/api/jobs', {
           sourceUrl: url, rightsConfirmed: rights, rightsBasis: $(`#${prefix}-basis`).value,
           formats: pick('formats'), resolutions: [single('res')],
           niche: $(`#${prefix}-niche`).value.trim(), uploadMode: single('mode'), captionStyle: single('style'),
-          telegramChatId: tgChatId(),
+          telegramChatId: tgChatId(), desk: deskOptionsFromForm(prefix),
         });
       }
       toast('Job created — the seven agents are running.');
@@ -253,7 +283,7 @@ function wireLinkBox(prefix) {
       $$('[data-tg-file]', tgList).forEach(b => b.addEventListener('click', async () => {
         b.disabled = true; b.textContent = 'IMPORTING…';
         try {
-          const job = await api.post('/api/telegram/import', { fileId: b.dataset.tgFile, rightsConfirmed: $(`#${prefix}-rights`).checked, rightsBasis: $(`#${prefix}-basis`).value, formats: pick('formats'), resolutions: [single('res')], niche: $(`#${prefix}-niche`).value.trim(), uploadMode: single('mode'), captionStyle: single('style'), telegramChatId: tgChatId() });
+          const job = await api.post('/api/telegram/import', { fileId: b.dataset.tgFile, rightsConfirmed: $(`#${prefix}-rights`).checked, rightsBasis: $(`#${prefix}-basis`).value, formats: pick('formats'), resolutions: [single('res')], niche: $(`#${prefix}-niche`).value.trim(), uploadMode: single('mode'), captionStyle: single('style'), telegramChatId: tgChatId(), desk: deskOptionsFromForm(prefix) });
           toast('Job created from Telegram — the seven agents are running.');
           tgHaptic('light');
           location.hash = `#/jobs/${job.id}`;
@@ -774,6 +804,10 @@ function viewPlaybook() {
 async function viewSettings() {
   showApp(`<h1>Settings</h1><p class="lede">Keys and connections, owned channels, permissions, platform limits and the toolkit probe. Nothing here is faked — a missing key turns its feature off and says so.</p>
   <div class="panel glass"><h2>Toolkit probe <span class="mono">GET /api/toolkit</span></h2><div id="set-tools"><p class="lede">Probing…</p></div></div>
+  <div class="panel glass"><h2>Editing desk <span class="mono">local VM only</span></h2>
+  <p class="lede">Optional pipeline stages from the editing desk. All default OFF and saved in this browser. They run only where the desk is installed (EDITING_DESK set on the server) — on Render's free tier every stage skips and jobs run exactly as before.</p>
+  <div id="set-desk"></div>
+  <p class="note">Chatterbox voiceover is DISABLED — its weights (~1 GB) come only from HuggingFace, and hf.co fetches are banned. DaVinci Resolve MCP is excluded — Resolve is a desktop app and cannot be controlled server-side.</p></div>
   <div class="panel glass"><h2>Platform limits <span class="mono" id="set-limits-when"></span></h2><div id="set-limits"></div></div>
   <div class="panel glass"><h2>Keys &amp; connections</h2><p class="lede">Set these as environment variables on the server (see .env.example). The UI never asks for secrets in a form.</p>
   <table class="tbl"><tr><th>Key</th><th>What it unlocks</th><th>Status</th></tr>
@@ -798,6 +832,9 @@ async function viewSettings() {
     const { tools } = await api.get('/api/toolkit');
     $('#set-tools').innerHTML = `<table class="tbl"><tr><th>Tool</th><th>Version</th><th>Status</th><th>Note</th></tr>${tools.map(t => `<tr><td>${esc(t.name)}</td><td>${esc(t.version || '—')}</td><td>${t.status === 'connected' ? '<span class="tag ok">connected</span>' : '<span class="tag warn">not installed</span>'}</td><td>${esc(t.note || '')}</td></tr>`).join('')}</table>`;
   } catch (e) { $('#set-tools').innerHTML = `<p class="lede">Probe failed: ${esc(e.message)}</p>`; }
+  // Editing-desk toggles (same localStorage keys as the New Job form).
+  $('#set-desk').innerHTML = DESK_STAGES.map(([id, label]) => `<label class="check" style="display:block;margin:4px 0"><input type="checkbox" data-desk="${id}" ${deskChecked(id) ? 'checked' : ''}> <span>${esc(label)}</span></label>`).join('');
+  $$('#set-desk input[data-desk]').forEach(cb => cb.addEventListener('change', () => localStorage.setItem(`wc-desk-${cb.dataset.desk}`, cb.checked ? '1' : '0')));
   try {
     const l = await api.get('/api/platform-limits');
     $('#set-limits-when').textContent = `last checked ${l.checkedAt}`;

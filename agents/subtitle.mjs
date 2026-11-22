@@ -4,7 +4,10 @@ import { logEvent, setAgent, saveJob } from '../packages/shared/job.mjs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export const CAPTION_STYLES = ['pop', 'bounce', 'karaoke'];
+export const CAPTION_STYLES = ['pop', 'bounce', 'karaoke', 'wordpop'];
+// Word-pop (remotion Basic Captions style — see the remotion-captions skill
+// in the editing desk): the current sentence stays on screen and the word
+// being spoken pops big + highlighted. No new dependency — pure ASS.
 // 9:16 canvas: 1080x1920. Safe area: captions live in the bottom 12% band,
 // never closer than 90px to the bottom edge, never wider than 900px.
 export const SAFE = { playW: 1080, playH: 1920, marginBottom: 90, marginSide: 90, maxFont: 96 };
@@ -16,7 +19,8 @@ function styleLine(style, fontScale) {
   const pop = `{\\an5\\pos(540,1560)\\fs${px}\\b1}`;
   const bounce = `{\\an5\\pos(540,1560)\\fs${px}\\b1}`;
   const karaoke = `{\\an5\\pos(540,1560)\\fs${px}\\b1}`;
-  return { pop, bounce, karaoke }[style] || pop;
+  const wordpop = `{\\an5\\pos(540,1560)\\fs${px}\\b1}`;
+  return { pop, bounce, karaoke, wordpop }[style] || pop;
 }
 
 // Build word events for one clip. words: [{w, start, end}] in source time.
@@ -49,7 +53,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return `${h}:${m}:${s}.${c}`;
   };
   const lines = [];
-  if (style === 'karaoke') {
+  if (style === 'wordpop') {
+    // Remotion word-pop: group words into sentences (max 10 words); one
+    // event per word, showing the whole sentence with the spoken word big
+    // + highlighted (CapHi). \fs is a per-run override, so the active word
+    // pops without moving the rest of the line.
+    const groups = [];
+    let cur = [];
+    for (const w of rel) {
+      cur.push(w);
+      if (/[.!?]$/.test(w.w.trim()) || cur.length >= 10) { groups.push(cur); cur = []; }
+    }
+    if (cur.length) groups.push(cur);
+    const activePx = Math.min(SAFE.maxFont, Math.round(84 * fontScale));
+    for (const g of groups) {
+      g.forEach((w, gi) => {
+        const text = g.map((gw, gj) => gj === gi
+          ? `{\\rCapHi\\fs${activePx}}${assEscape(gw.w.trim().toUpperCase())}{\\r}`
+          : assEscape(gw.w.trim().toUpperCase())).join(' ');
+        lines.push(`Dialogue: 0,${fmt(w.start)},${fmt(w.end)},Cap,,0,0,0,,${styleLine(style, fontScale)}${text}`);
+      });
+    }
+  } else if (style === 'karaoke') {
     // One event per word-group (up to 4 words), active word highlighted.
     for (let i = 0; i < rel.length; i += 4) {
       const group = rel.slice(i, i + 4);

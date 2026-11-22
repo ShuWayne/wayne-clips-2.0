@@ -3,9 +3,9 @@
 import { execFile } from 'node:child_process';
 import { access, constants } from 'node:fs/promises';
 
-export function run(cmd, args, { timeoutMs = 120000, maxBuffer = 16 * 1024 * 1024 } = {}) {
+export function run(cmd, args, { timeoutMs = 120000, maxBuffer = 16 * 1024 * 1024, env = null, cwd = null } = {}) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer }, (err, stdout, stderr) => {
+    execFile(cmd, args, { timeout: timeoutMs, maxBuffer, ...(env ? { env } : {}), ...(cwd ? { cwd } : {}) }, (err, stdout, stderr) => {
       if (err) {
         const e = new Error(`${cmd} failed: ${(stderr || err.message).slice(0, 500)}`);
         e.code = err.code; e.stdout = stdout; e.stderr = stderr;

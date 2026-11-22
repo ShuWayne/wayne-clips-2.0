@@ -38,6 +38,20 @@ export function newJob(input, jobsRoot) {
       pageId: input.pageId || null,
       licenceId: input.licenceId || null,
       captionStyle: input.captionStyle || 'pop',
+      // Editing-desk stages (agents/editing-desk.mjs). All default OFF.
+      // Each stage also needs EDITING_DESK set on the host; without it the
+      // stage skips and the job runs exactly as before.
+      desk: {
+        losslessTrim: !!input.desk?.losslessTrim,
+        trimStart: Number.isFinite(input.desk?.trimStart) ? input.desk.trimStart : null,
+        trimEnd: Number.isFinite(input.desk?.trimEnd) ? input.desk.trimEnd : null,
+        silenceCut: !!input.desk?.silenceCut,
+        denoise: !!input.desk?.denoise,
+        demucsVocals: !!input.desk?.demucsVocals,
+        rembgPoster: !!input.desk?.rembgPoster,
+        upscalePoster: !!input.desk?.upscalePoster,
+        titleCard: !!input.desk?.titleCard,
+      },
     },
     agents: {},
     events: [],

@@ -2,6 +2,10 @@
 // are selectable; anything the renderer cannot draw is marked `planned`
 // and is NEVER selected. At most 0.5 effects per second of clip.
 import { logEvent, setAgent, saveJob } from '../packages/shared/job.mjs';
+import { copyFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { run } from '../packages/shared/media.mjs';
+import { deskAvailable, isolateVocals, stageEnabled } from './editing-desk.mjs';
 
 export const EFFECTS = [
   { id: 'grade-warm', name: 'Warm grade', draw: 'eq=brightness=0.03:saturation=1.15', emotion: 'warm', planned: false },
@@ -40,6 +44,36 @@ export async function runEffects(job, ctx) {
     effects: chooseEffects(m, { emotion: i % 2 === 0 ? 'energy' : 'cinematic' }),
   }));
   const output = { perClip, plannedExcluded: EFFECTS.filter(e => e.planned).map(e => e.id) };
+  // Editing desk: demucs vocal isolation (optional, default OFF). One
+  // vocals stem per clip, cut from the working source; the render agent
+  // swaps the clip audio for the stem when it exists. Slow on CPU
+  // (~50s per 15s of audio) — a failure skips that clip only, never the job.
+  if (stageEnabled(job, 'demucsVocals')) {
+    if (!deskAvailable()) {
+      logEvent(job, 'effects', 'running', 'Effects: vocal isolation is ON but EDITING_DESK is not set on this host — skipping, clips keep their original audio.', emit);
+    } else {
+      const ingest = job.agents.ingest.output;
+      const source = join(job.dirAbs, ingest.sourceFile);
+      const demucsOut = [];
+      for (const clip of (job.clips || [])) {
+        try {
+          const audio = join(job.dirAbs, `clip-${clip.rank}-audio.wav`);
+          await run('ffmpeg', ['-y', '-v', 'error', '-ss', String(clip.start), '-to', String(clip.end),
+            '-i', source, '-vn', '-c:a', 'pcm_s16le', audio], { timeoutMs: 120000 });
+          const r = await isolateVocals(audio, join(job.dirAbs, 'demucs', `clip-${clip.rank}`));
+          const dest = join(job.dirAbs, `clip-${clip.rank}-vocals.wav`);
+          await copyFile(r.vocals, dest);
+          clip.vocalsFile = `clip-${clip.rank}-vocals.wav`;
+          demucsOut.push({ rank: clip.rank, vocalsFile: clip.vocalsFile, duration: +r.duration.toFixed(2) });
+          logEvent(job, 'effects', 'running', `Effects: clip #${clip.rank} vocals isolated (demucs, ${r.duration.toFixed(1)}s stem) — render will use the clean voice track.`, emit);
+        } catch (err) {
+          demucsOut.push({ rank: clip.rank, error: err.message.slice(0, 140) });
+          logEvent(job, 'effects', 'running', `Effects: clip #${clip.rank} vocal isolation skipped (${err.message.slice(0, 120)}) — original audio kept.`, emit);
+        }
+      }
+      output.demucs = demucsOut;
+    }
+  }
   logEvent(job, 'effects', 'done', `Effects: presets chosen per clip (≤0.5/sec, ffmpeg-drawable only); ${output.plannedExcluded.length} planned-only presets excluded from selection.`, emit);
   job.agents.effects.output = output;
   setAgent(job, 'effects', 'done', output, null, emit);

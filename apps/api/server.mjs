@@ -16,6 +16,7 @@ import { listTelegramUpdates, downloadTelegramFile, restoreJobsFromTelegram } fr
 import { validateInitData, createSessionToken, verifySessionToken } from '../../agents/telegram-auth.mjs';
 import { r2Config, mirrorPut, restoreJobs } from '../../packages/shared/store.mjs';
 import { run as mediaRun } from '../../packages/shared/media.mjs';
+import { probeDeskTools } from '../../agents/editing-desk.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WEB_ROOT = join(ROOT, 'apps/web');
@@ -184,7 +185,26 @@ async function probeToolkit() {
   probes.push({ id: 'redis', name: 'Redis / BullMQ queue', version: null, status: 'not_connected', note: 'Not configured — the in-process queue is used instead.' });
   probes.push({ id: 'libass', name: 'libass caption burn-in', version: null, status: probes.find(p => p.id === 'ffmpeg')?.status === 'connected' ? 'connected' : 'not_connected', note: 'Ships with FFmpeg; unavailable while FFmpeg is unavailable.' });
   probes.push({ id: 'reframe', name: 'Reframe engine', version: null, status: probes.find(p => p.id === 'ffmpeg')?.status === 'connected' ? 'connected' : 'not_connected', note: 'Runs on FFmpeg crops; unavailable while FFmpeg is unavailable.' });
+  // Editing desk (agents/editing-desk.mjs) — real probes, only when the
+  // desk is installed on this host; on Render free tier every stage skips.
+  probes.push(...await probeDeskTools());
   return probes;
+}
+
+// Normalize the editing-desk options from a job request (multipart fields
+// arrive as strings, JSON bodies as typed values). Unknown keys are
+// dropped; trim seconds are coerced to numbers or null.
+function parseDesk(raw) {
+  let d = {};
+  try { d = typeof raw === 'string' ? JSON.parse(raw) : (raw || {}); } catch { d = {}; }
+  const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+  return {
+    losslessTrim: !!d.losslessTrim,
+    trimStart: num(d.trimStart), trimEnd: num(d.trimEnd),
+    silenceCut: !!d.silenceCut, denoise: !!d.denoise,
+    demucsVocals: !!d.demucsVocals, rembgPoster: !!d.rembgPoster,
+    upscalePoster: !!d.upscalePoster, titleCard: !!d.titleCard,
+  };
 }
 
 // --- routes ---
@@ -193,7 +213,7 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (path === '/api/health' && method === 'GET') {
-    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, openai: !!process.env.OPENAI_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY, telegram: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID), storage: !!r2Config(process.env) } });
+    return sendJson(res, 200, { ok: true, status: 'ok', version: '2.0.0', time: new Date().toISOString(), services: { ffmpeg: true, whisper: true, claude: !!process.env.ANTHROPIC_API_KEY, openai: !!process.env.OPENAI_API_KEY, youtube: !!process.env.YOUTUBE_API_KEY, telegram: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID), storage: !!r2Config(process.env), editingDesk: !!process.env.EDITING_DESK } });
   }
   if (path === '/api/toolkit' && method === 'GET') {
     return sendJson(res, 200, { ok: true, tools: await probeToolkit() });
@@ -275,11 +295,13 @@ async function handleApi(req, res, url) {
         pageId: parsed.fields.pageId || null,
         licenceId: parsed.fields.licenceId || null,
         telegramChatId: (parsed.fields.telegramChatId || '').trim(),
+        desk: parseDesk(parsed.fields.desk),
       };
       uploadedFile = parsed.file;
       if (uploadedFile) input._uploadTmp = { dir: tmpDir, path: uploadedFile.path, filename: uploadedFile.filename };
     } else {
       input = await readJsonBody(req);
+      input.desk = parseDesk(input.desk);
     }
     const errors = validateJobInput({ ...input, sourceFile: uploadedFile ? 'upload' : input.sourceFile });
     if (errors.length) return sendErr(res, 400, errors.join(' | '));
@@ -343,6 +365,7 @@ async function handleApi(req, res, url) {
       niche: body.niche || '', uploadMode: body.uploadMode || 'review', captionStyle: body.captionStyle || 'pop',
       pageId: body.pageId || null, licenceId: body.licenceId || null,
       telegramChatId: String(body.telegramChatId || '').trim(),
+      desk: parseDesk(body.desk),
     };
     const errors = validateJobInput(input);
     if (errors.length) return sendErr(res, 400, errors.join(' | '));
